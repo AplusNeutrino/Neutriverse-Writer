@@ -28,6 +28,8 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 
 ## Features
 
+- Neutriverse-styled dark UI with logo blue and gold accents.
+- Application icon based on the Neutriverse site logo.
 - Left pane: dark live preview using site-like article typography.
 - Right pane: dark Markdown/HTML source editor with automatic line wrapping, GitHub-like monospace typography, and lightweight syntax highlighting.
 - New/Open/Save/Save As for `_posts/*.md`.
@@ -41,6 +43,6 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 
 ## Version
 
-Current source snapshot: v1.0.
+Current source snapshot: v1.1 in progress.
 
 The preview is intended as a close writing preview, not a byte-for-byte Jekyll renderer.

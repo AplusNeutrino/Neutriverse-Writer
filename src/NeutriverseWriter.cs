@@ -12,6 +12,15 @@ namespace NeutriverseWriter
 {
     public class MainForm : Form
     {
+        private static readonly Color Surface = Color.FromArgb(18, 20, 25);
+        private static readonly Color SurfaceRaised = Color.FromArgb(27, 29, 36);
+        private static readonly Color SurfaceSoft = Color.FromArgb(36, 39, 48);
+        private static readonly Color Border = Color.FromArgb(58, 64, 78);
+        private static readonly Color TextPrimary = Color.FromArgb(221, 232, 247);
+        private static readonly Color TextMuted = Color.FromArgb(154, 164, 178);
+        private static readonly Color LogoBlue = Color.FromArgb(10, 72, 255);
+        private static readonly Color LogoGold = Color.FromArgb(216, 183, 106);
+
         private readonly string repoRoot;
         private readonly string postsDir;
         private readonly string imageRoot;
@@ -22,8 +31,11 @@ namespace NeutriverseWriter
         private readonly ToolStripStatusLabel status;
         private readonly Timer previewTimer;
         private readonly Timer highlightTimer;
+        private ToolStripButton eyeButton;
         private bool applyingHighlight;
+        private bool comfortMode;
         private string currentFile;
+        private string savedTextSnapshot = "";
 
         [STAThread]
         public static void Main(string[] args)
@@ -66,6 +78,21 @@ namespace NeutriverseWriter
             }
         }
 
+        private void TryLoadAppIcon()
+        {
+            try
+            {
+                string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "app.ico");
+                if (File.Exists(iconPath))
+                {
+                    Icon = new Icon(iconPath);
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private static string FindRepoRoot(string start)
         {
             var dir = new DirectoryInfo(start);
@@ -92,12 +119,20 @@ namespace NeutriverseWriter
             Width = 1360;
             Height = 860;
             StartPosition = FormStartPosition.CenterScreen;
+            MinimumSize = new Size(980, 620);
+            BackColor = Surface;
+            TryLoadAppIcon();
 
             var toolbar = BuildToolbar();
             Controls.Add(toolbar);
 
             split = new SplitContainer();
             split.Dock = DockStyle.Fill;
+            split.BackColor = Border;
+            split.SplitterWidth = 3;
+            split.Panel1.BackColor = Surface;
+            split.Panel2.BackColor = GetEditorBackColor();
+            split.Panel2.Padding = new Padding(14, 0, 0, 0);
 
             preview = new WebBrowser();
             preview.Dock = DockStyle.Fill;
@@ -111,8 +146,8 @@ namespace NeutriverseWriter
             editor.AcceptsTab = true;
             editor.WordWrap = true;
             editor.BorderStyle = BorderStyle.None;
-            editor.BackColor = Color.FromArgb(13, 17, 23);
-            editor.ForeColor = Color.FromArgb(230, 237, 243);
+            editor.BackColor = GetEditorBackColor();
+            editor.ForeColor = GetEditorTextColor();
             editor.SelectionColor = editor.ForeColor;
             editor.Font = new Font("Consolas", 11f);
             editor.HideSelection = false;
@@ -123,6 +158,7 @@ namespace NeutriverseWriter
                 {
                     QueuePreview();
                     QueueHighlight();
+                    UpdateWindowTitle();
                 }
             };
             editor.DragEnter += EditorDragEnter;
@@ -133,9 +169,16 @@ namespace NeutriverseWriter
             split.BringToFront();
 
             statusStrip = new StatusStrip();
+            statusStrip.BackColor = SurfaceRaised;
+            statusStrip.ForeColor = TextMuted;
+            statusStrip.Renderer = new NeutriverseToolStripRenderer();
+            statusStrip.SizingGrip = false;
             status = new ToolStripStatusLabel();
+            status.ForeColor = TextMuted;
+            status.Font = new Font("Segoe UI", 9f);
             statusStrip.Items.Add(status);
             Controls.Add(statusStrip);
+            FormClosing += MainForm_FormClosing;
 
             previewTimer = new Timer();
             previewTimer.Interval = 350;
@@ -168,6 +211,14 @@ namespace NeutriverseWriter
             var toolbar = new ToolStrip();
             toolbar.GripStyle = ToolStripGripStyle.Hidden;
             toolbar.Dock = DockStyle.Top;
+            toolbar.AutoSize = false;
+            toolbar.Height = 42;
+            toolbar.Padding = new Padding(8, 5, 8, 5);
+            toolbar.BackColor = SurfaceRaised;
+            toolbar.ForeColor = TextPrimary;
+            toolbar.Font = new Font("Segoe UI", 9.5f);
+            toolbar.RenderMode = ToolStripRenderMode.Professional;
+            toolbar.Renderer = new NeutriverseToolStripRenderer();
 
             AddButton(toolbar, "New", delegate { NewDraft(); });
             AddButton(toolbar, "Open", delegate { OpenPost(); });
@@ -176,6 +227,7 @@ namespace NeutriverseWriter
             toolbar.Items.Add(new ToolStripSeparator());
             AddButton(toolbar, "Insert Image", delegate { InsertImagesFromDialog(); });
             AddButton(toolbar, "Refresh", delegate { RenderPreview(); });
+            eyeButton = AddToggleButton(toolbar, "Eye", delegate { ToggleComfortMode(); });
             toolbar.Items.Add(new ToolStripSeparator());
 
             AddButton(toolbar, "H1", delegate { PrefixLines("# "); });
@@ -246,19 +298,56 @@ namespace NeutriverseWriter
             return toolbar;
         }
 
-        private void AddButton(ToolStrip toolbar, string text, EventHandler click)
+        private ToolStripButton AddButton(ToolStrip toolbar, string text, EventHandler click)
         {
             var button = new ToolStripButton(text);
+            StyleToolButton(button, toolbar, text);
             button.Click += click;
             toolbar.Items.Add(button);
+            return button;
+        }
+
+        private ToolStripButton AddToggleButton(ToolStrip toolbar, string text, EventHandler click)
+        {
+            var button = new ToolStripButton(text);
+            StyleToolButton(button, toolbar, text);
+            button.CheckOnClick = false;
+            button.Click += click;
+            toolbar.Items.Add(button);
+            return button;
+        }
+
+        private void StyleToolButton(ToolStripButton button, ToolStrip toolbar, string text)
+        {
+            button.AutoSize = false;
+            button.Width = Math.Max(34, TextRenderer.MeasureText(text, toolbar.Font).Width + 20);
+            button.Height = 30;
+            button.Padding = new Padding(8, 0, 8, 0);
+            button.Margin = new Padding(1, 0, 1, 0);
+            button.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            button.ForeColor = TextPrimary;
         }
 
         private void AddDropdown(ToolStrip toolbar, string text, Dictionary<string, EventHandler> items)
         {
             var dropdown = new ToolStripDropDownButton(text);
+            dropdown.AutoSize = false;
+            dropdown.Width = Math.Max(44, TextRenderer.MeasureText(text, toolbar.Font).Width + 26);
+            dropdown.Height = 30;
+            dropdown.Padding = new Padding(8, 0, 8, 0);
+            dropdown.Margin = new Padding(1, 0, 1, 0);
+            dropdown.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            dropdown.ForeColor = TextPrimary;
+            dropdown.DropDown.BackColor = SurfaceRaised;
+            dropdown.DropDown.ForeColor = TextPrimary;
+            dropdown.DropDown.Padding = new Padding(4);
+            dropdown.DropDown.Renderer = new NeutriverseToolStripRenderer();
             foreach (var item in items)
             {
                 var menuItem = new ToolStripMenuItem(item.Key);
+                menuItem.BackColor = SurfaceRaised;
+                menuItem.ForeColor = TextPrimary;
+                menuItem.Font = new Font("Segoe UI", 9.5f);
                 menuItem.Click += item.Value;
                 dropdown.DropDownItems.Add(menuItem);
             }
@@ -267,6 +356,11 @@ namespace NeutriverseWriter
 
         private void NewDraft()
         {
+            if (!ConfirmSaveChanges())
+            {
+                return;
+            }
+
             currentFile = null;
             string date = DateTime.Now.ToString("yyyy-MM-dd");
             string nl = Environment.NewLine;
@@ -285,12 +379,19 @@ namespace NeutriverseWriter
                 "这里写正文。",
                 ""
             });
+            savedTextSnapshot = editor.Text;
+            UpdateWindowTitle();
             SetStatus("New draft created.");
             RenderPreview();
         }
 
         private void OpenPost()
         {
+            if (!ConfirmSaveChanges())
+            {
+                return;
+            }
+
             using (var dialog = new OpenFileDialog())
             {
                 dialog.InitialDirectory = postsDir;
@@ -302,18 +403,20 @@ namespace NeutriverseWriter
 
                 currentFile = dialog.FileName;
                 editor.Text = File.ReadAllText(currentFile, Encoding.UTF8);
+                savedTextSnapshot = editor.Text;
+                UpdateWindowTitle();
                 SetStatus("Opened " + currentFile);
                 RenderPreview();
             }
         }
 
-        private void SavePost(bool saveAs)
+        private bool SavePost(bool saveAs)
         {
             string text = editor.Text;
             if (!HasFrontMatter(text))
             {
                 MessageBox.Show(this, "The post needs YAML front matter.", "Neutriverse Writer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                return false;
             }
 
             if (saveAs || string.IsNullOrEmpty(currentFile))
@@ -334,12 +437,26 @@ namespace NeutriverseWriter
                     title = "new-post";
                 }
 
-                currentFile = Path.Combine(postsDir, date + "-" + SanitizeFileName(title) + ".md");
+                using (var dialog = new SaveFileDialog())
+                {
+                    dialog.InitialDirectory = postsDir;
+                    dialog.Filter = "Markdown posts (*.md)|*.md|All files (*.*)|*.*";
+                    dialog.FileName = date + "-" + SanitizeFileName(title) + ".md";
+                    if (dialog.ShowDialog(this) != DialogResult.OK)
+                    {
+                        return false;
+                    }
+
+                    currentFile = dialog.FileName;
+                }
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(currentFile));
             File.WriteAllText(currentFile, editor.Text, new UTF8Encoding(false));
+            savedTextSnapshot = editor.Text;
+            UpdateWindowTitle();
             SetStatus("Saved " + currentFile);
+            return true;
         }
 
         private void InsertImagesFromDialog()
@@ -559,6 +676,50 @@ namespace NeutriverseWriter
             previewTimer.Start();
         }
 
+        private Color GetEditorBackColor()
+        {
+            return comfortMode ? Color.FromArgb(31, 32, 27) : Color.FromArgb(17, 20, 24);
+        }
+
+        private Color GetEditorTextColor()
+        {
+            return comfortMode ? Color.FromArgb(211, 204, 184) : Color.FromArgb(210, 216, 222);
+        }
+
+        private Color GetPreviewBackColor()
+        {
+            return comfortMode ? Color.FromArgb(31, 32, 27) : Color.FromArgb(27, 27, 30);
+        }
+
+        private Color GetPreviewTextColor()
+        {
+            return comfortMode ? Color.FromArgb(207, 200, 181) : Color.FromArgb(196, 202, 208);
+        }
+
+        private void ToggleComfortMode()
+        {
+            comfortMode = !comfortMode;
+            if (eyeButton != null)
+            {
+                eyeButton.Checked = comfortMode;
+                eyeButton.Text = comfortMode ? "Eye On" : "Eye";
+                eyeButton.Width = Math.Max(52, TextRenderer.MeasureText(eyeButton.Text, eyeButton.Font).Width + 20);
+            }
+
+            ApplyEditorTheme();
+            RenderPreview();
+            QueueHighlight();
+            SetStatus(comfortMode ? "Eye comfort mode enabled." : "Eye comfort mode disabled.");
+        }
+
+        private void ApplyEditorTheme()
+        {
+            editor.BackColor = GetEditorBackColor();
+            editor.ForeColor = GetEditorTextColor();
+            editor.SelectionColor = editor.ForeColor;
+            split.Panel2.BackColor = editor.BackColor;
+        }
+
         private void QueueHighlight()
         {
             highlightTimer.Stop();
@@ -580,7 +741,7 @@ namespace NeutriverseWriter
             {
                 editor.SuspendLayout();
                 editor.SelectAll();
-                editor.SelectionColor = Color.FromArgb(230, 237, 243);
+                editor.SelectionColor = GetEditorTextColor();
                 editor.SelectionFont = new Font(editor.Font, FontStyle.Regular);
 
                 ColorPattern("(?m)^---\\s*$", Color.FromArgb(139, 148, 158), false);
@@ -591,12 +752,12 @@ namespace NeutriverseWriter
                 ColorPattern("<[^>]+>", Color.FromArgb(139, 148, 158), false);
                 ColorPattern("class=\\\"[^\\\"]*nv-[^\\\"]*\\\"", Color.FromArgb(210, 168, 255), false);
                 ColorPattern("`[^`]+`", Color.FromArgb(126, 231, 135), false);
-                ColorPattern("\\*\\*[^*]+\\*\\*", Color.FromArgb(255, 255, 255), true);
+                ColorPattern("\\*\\*[^*]+\\*\\*", comfortMode ? Color.FromArgb(229, 219, 190) : Color.FromArgb(230, 235, 240), true);
                 ColorPattern("~~[^~]+~~", Color.FromArgb(255, 123, 114), false);
 
                 editor.SelectionStart = Math.Min(start, editor.TextLength);
                 editor.SelectionLength = Math.Min(length, editor.TextLength - editor.SelectionStart);
-                editor.SelectionColor = Color.FromArgb(230, 237, 243);
+                editor.SelectionColor = GetEditorTextColor();
             }
             finally
             {
@@ -631,24 +792,29 @@ namespace NeutriverseWriter
             string cssPath = Path.Combine(repoRoot, "assets", "css", "ChirpyDefault.css");
             string css = File.Exists(cssPath) ? File.ReadAllText(cssPath, Encoding.UTF8) : "";
             string title = WebUtility.HtmlEncode(GetFrontMatterValue(source, "title"));
+            string previewBack = ColorTranslator.ToHtml(GetPreviewBackColor());
+            string previewText = ColorTranslator.ToHtml(GetPreviewTextColor());
+            string previewHeading = comfortMode ? "#e0d5b8" : "#dce8f7";
+            string previewCodeBack = comfortMode ? "#292a24" : "#242426";
+            string previewInlineCode = comfortMode ? "#34342d" : "#2a2a2d";
             string baseCss =
-                "html,body{background:#1b1b1e!important;color:#c9d1d9!important;}" +
+                "html,body{background:" + previewBack + "!important;color:" + previewText + "!important;}" +
                 "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC','Microsoft YaHei',sans-serif;line-height:1.75;padding:2rem 2.35rem;max-width:860px;margin:0 auto;}" +
                 ".content{font-size:1.03rem;letter-spacing:0;}" +
                 ".content p{margin:0 0 1rem;}" +
-                ".content h1,.content h2,.content h3,.content h4{color:#dce8f7!important;font-weight:500;line-height:1.35;margin:2.1rem 0 1rem;}" +
+                ".content h1,.content h2,.content h3,.content h4{color:" + previewHeading + "!important;font-weight:500;line-height:1.35;margin:2.1rem 0 1rem;}" +
                 ".content>h1:first-child{margin-top:0;font-size:2.05rem;font-weight:500;}" +
                 ".content h1{font-size:2.05rem}.content h2{font-size:1.65rem}.content h3{font-size:1.35rem}.content h4{font-size:1.18rem}" +
-                "strong{font-weight:700;color:#dce8f7;} em{font-style:italic;} del{text-decoration:line-through;} u{text-decoration:underline;}" +
+                "strong{font-weight:700;color:" + previewHeading + ";} em{font-style:italic;} del{text-decoration:line-through;} u{text-decoration:underline;}" +
                 "a{color:#8fb7ff;} img{max-width:100%;height:auto;border-radius:.35rem;}" +
                 "hr{height:1px;margin:2rem 0;border:0;background:#30363d;}" +
                 ".content ul,.content ol{margin:0 0 1rem 1.35rem;padding-left:1.25rem}.content li{margin:.35rem 0}.content li::marker{color:#9aa4b2;}" +
-                ".content blockquote{margin:1.2rem 0 1.2rem 1rem;padding:.1rem 0 .1rem 1rem;border-left:.22rem solid #4f6fff!important;background:transparent!important;color:#c9d1d9!important;}" +
-                ".content blockquote p{margin:.45rem 0;color:#c9d1d9!important;}" +
-                ".content code{font-family:Consolas,'Cascadia Mono',monospace;font-size:.92em;background:#2a2a2d!important;color:#d7e3f0!important;border-radius:0;padding:.13rem .34rem;}" +
-                ".content pre{margin:1rem 0 1.25rem;padding:1rem;background:#242426!important;color:#d7e3f0!important;border-radius:0;overflow:auto;white-space:pre-wrap;word-wrap:break-word;}" +
+                ".content blockquote{margin:1.2rem 0 1.2rem 1rem;padding:.1rem 0 .1rem 1rem;border-left:.22rem solid #4f6fff!important;background:transparent!important;color:" + previewText + "!important;}" +
+                ".content blockquote p{margin:.45rem 0;color:" + previewText + "!important;}" +
+                ".content code{font-family:Consolas,'Cascadia Mono',monospace;font-size:.92em;background:" + previewInlineCode + "!important;color:" + previewHeading + "!important;border-radius:0;padding:.13rem .34rem;}" +
+                ".content pre{margin:1rem 0 1.25rem;padding:1rem;background:" + previewCodeBack + "!important;color:" + previewHeading + "!important;border-radius:0;overflow:auto;white-space:pre-wrap;word-wrap:break-word;}" +
                 ".content pre code{display:block;padding:0;background:transparent!important;color:inherit!important;border:0;}" +
-                ".content table{border-collapse:collapse;width:100%;margin:1rem 0 1.25rem;display:table}.content th,.content td{border:1px solid #34383f;padding:.45rem .65rem}.content th{background:#242426!important;color:#dce8f7!important;font-weight:700}.content td{background:#1b1b1e!important}" +
+                ".content table{border-collapse:collapse;width:100%;margin:1rem 0 1.25rem;display:table}.content th,.content td{border:1px solid #34383f;padding:.45rem .65rem}.content th{background:" + previewCodeBack + "!important;color:" + previewHeading + "!important;font-weight:700}.content td{background:" + previewBack + "!important}" +
                 ".nv-red{color:#ff7d7d!important}.nv-orange{color:#ffab70!important}.nv-gold{color:#d8b76a!important}.nv-green{color:#7ee787!important}.nv-cyan{color:#76e3ea!important}.nv-blue{color:#79c0ff!important}.nv-purple{color:#d2a8ff!important}.nv-pink{color:#ff9bd2!important}.nv-muted{color:#8b949e!important}" +
                 ".nv-underline{display:inline;border-bottom:.08em solid currentColor!important;text-decoration:none!important;padding-bottom:.04em}.nv-dotted{display:inline;border-bottom:.1em dotted currentColor!important;text-decoration:none!important;padding-bottom:.04em}.nv-wavy{display:inline;border-bottom:.1em solid currentColor!important;text-decoration:none!important;padding-bottom:.04em}" +
                 ".nv-mark,.nv-mark-gold{background:rgba(216,183,106,.20)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}.nv-mark-red{background:rgba(255,125,125,.18)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}.nv-mark-blue{background:rgba(143,183,255,.18)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}.nv-mark-green{background:rgba(130,217,130,.16)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}" +
@@ -1097,6 +1263,158 @@ namespace NeutriverseWriter
         private void SetStatus(string message)
         {
             status.Text = message;
+        }
+
+        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (!ConfirmSaveChanges())
+            {
+                e.Cancel = true;
+            }
+        }
+
+        private bool ConfirmSaveChanges()
+        {
+            if (!HasUnsavedChanges())
+            {
+                return true;
+            }
+
+            DialogResult result = MessageBox.Show(
+                this,
+                "Save changes before continuing?",
+                "Neutriverse Writer",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            if (result == DialogResult.Cancel)
+            {
+                return false;
+            }
+
+            if (result == DialogResult.No)
+            {
+                return true;
+            }
+
+            return SavePost(false);
+        }
+
+        private bool HasUnsavedChanges()
+        {
+            return !string.Equals(editor.Text, savedTextSnapshot, StringComparison.Ordinal);
+        }
+
+        private void UpdateWindowTitle()
+        {
+            string name = string.IsNullOrWhiteSpace(currentFile) ? "Untitled" : Path.GetFileName(currentFile);
+            Text = (HasUnsavedChanges() ? "* " : "") + name + " - Neutriverse Writer";
+        }
+
+        private sealed class NeutriverseToolStripRenderer : ToolStripProfessionalRenderer
+        {
+            public NeutriverseToolStripRenderer()
+                : base(new NeutriverseColorTable())
+            {
+                RoundedEdges = false;
+            }
+
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+            {
+                using (var pen = new Pen(Border))
+                {
+                    Rectangle rect = new Rectangle(0, e.ToolStrip.Height - 1, e.ToolStrip.Width, 1);
+                    e.Graphics.DrawLine(pen, rect.Left, rect.Top, rect.Right, rect.Top);
+                }
+            }
+
+            protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
+            {
+                PaintItemBackground(e);
+            }
+
+            protected override void OnRenderDropDownButtonBackground(ToolStripItemRenderEventArgs e)
+            {
+                PaintItemBackground(e);
+            }
+
+            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+            {
+                PaintItemBackground(e);
+            }
+
+            protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+            {
+                int y1 = 8;
+                int y2 = e.Item.Height - 8;
+                int x = e.Item.Width / 2;
+                using (var pen = new Pen(Color.FromArgb(74, Border)))
+                {
+                    e.Graphics.DrawLine(pen, x, y1, x, y2);
+                }
+            }
+
+            protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+            {
+                e.ArrowColor = e.Item.Selected ? LogoGold : TextMuted;
+                base.OnRenderArrow(e);
+            }
+
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                e.TextColor = e.Item.Enabled ? (e.Item.Selected ? LogoGold : TextPrimary) : TextMuted;
+                base.OnRenderItemText(e);
+            }
+
+            private static void PaintItemBackground(ToolStripItemRenderEventArgs e)
+            {
+                var button = e.Item as ToolStripButton;
+                bool active = button != null && button.Checked;
+                Color fill = active ? Color.FromArgb(42, 39, 28) : e.Item.Pressed ? Color.FromArgb(24, 38, 91) : e.Item.Selected ? SurfaceSoft : SurfaceRaised;
+                if (e.ToolStrip is ToolStripDropDown)
+                {
+                    fill = e.Item.Selected ? Color.FromArgb(31, 43, 75) : SurfaceRaised;
+                }
+
+                using (var brush = new SolidBrush(fill))
+                {
+                    e.Graphics.FillRectangle(brush, new Rectangle(Point.Empty, e.Item.Size));
+                }
+
+                if (active || e.Item.Selected || e.Item.Pressed)
+                {
+                    using (var pen = new Pen(active ? LogoGold : e.Item.Pressed ? LogoBlue : Color.FromArgb(92, LogoBlue)))
+                    {
+                        Rectangle borderRect = new Rectangle(1, 1, e.Item.Width - 3, e.Item.Height - 3);
+                        e.Graphics.DrawRectangle(pen, borderRect);
+                    }
+                }
+            }
+        }
+
+        private sealed class NeutriverseColorTable : ProfessionalColorTable
+        {
+            public override Color ToolStripGradientBegin { get { return SurfaceRaised; } }
+            public override Color ToolStripGradientMiddle { get { return SurfaceRaised; } }
+            public override Color ToolStripGradientEnd { get { return SurfaceRaised; } }
+            public override Color MenuStripGradientBegin { get { return SurfaceRaised; } }
+            public override Color MenuStripGradientEnd { get { return SurfaceRaised; } }
+            public override Color ImageMarginGradientBegin { get { return SurfaceRaised; } }
+            public override Color ImageMarginGradientMiddle { get { return SurfaceRaised; } }
+            public override Color ImageMarginGradientEnd { get { return SurfaceRaised; } }
+            public override Color ToolStripDropDownBackground { get { return SurfaceRaised; } }
+            public override Color MenuItemSelected { get { return SurfaceSoft; } }
+            public override Color MenuItemSelectedGradientBegin { get { return SurfaceSoft; } }
+            public override Color MenuItemSelectedGradientEnd { get { return SurfaceSoft; } }
+            public override Color MenuItemBorder { get { return LogoBlue; } }
+            public override Color ButtonSelectedGradientBegin { get { return SurfaceSoft; } }
+            public override Color ButtonSelectedGradientMiddle { get { return SurfaceSoft; } }
+            public override Color ButtonSelectedGradientEnd { get { return SurfaceSoft; } }
+            public override Color ButtonPressedGradientBegin { get { return Color.FromArgb(24, 38, 91); } }
+            public override Color ButtonPressedGradientMiddle { get { return Color.FromArgb(24, 38, 91); } }
+            public override Color ButtonPressedGradientEnd { get { return Color.FromArgb(24, 38, 91); } }
+            public override Color SeparatorDark { get { return Border; } }
+            public override Color SeparatorLight { get { return Border; } }
         }
     }
 }
