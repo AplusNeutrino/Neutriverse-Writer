@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
@@ -20,6 +21,9 @@ namespace NeutriverseWriter
         private static readonly Color TextMuted = Color.FromArgb(154, 164, 178);
         private static readonly Color LogoBlue = Color.FromArgb(10, 72, 255);
         private static readonly Color LogoGold = Color.FromArgb(216, 183, 106);
+        private const int WM_SETREDRAW = 0x000B;
+        private const int EM_GETSCROLLPOS = 0x04DD;
+        private const int EM_SETSCROLLPOS = 0x04DE;
 
         private readonly string repoRoot;
         private readonly string postsDir;
@@ -31,11 +35,33 @@ namespace NeutriverseWriter
         private readonly ToolStripStatusLabel status;
         private readonly Timer previewTimer;
         private readonly Timer highlightTimer;
+        private readonly Timer scrollSyncTimer;
         private ToolStripButton eyeButton;
+        private ToolStripButton previewModeButton;
         private bool applyingHighlight;
         private bool comfortMode;
+        private bool livePreview = true;
+        private bool previewDirty;
+        private bool restorePreviewScroll;
+        private bool syncingScroll;
+        private DateTime ignoreScrollSyncUntil = DateTime.MinValue;
+        private Point pendingPreviewScroll;
+        private int lastPreviewScrollTop = -1;
         private string currentFile;
         private string savedTextSnapshot = "";
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativePoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref NativePoint lParam);
 
         [STAThread]
         public static void Main(string[] args)
@@ -138,6 +164,14 @@ namespace NeutriverseWriter
             preview.Dock = DockStyle.Fill;
             preview.AllowWebBrowserDrop = false;
             preview.ScriptErrorsSuppressed = true;
+            preview.DocumentCompleted += delegate
+            {
+                if (restorePreviewScroll && preview.Document != null && preview.Document.Window != null)
+                {
+                    restorePreviewScroll = false;
+                    preview.Document.Window.ScrollTo(pendingPreviewScroll.X, pendingPreviewScroll.Y);
+                }
+            };
             split.Panel1.Controls.Add(preview);
 
             editor = new RichTextBox();
@@ -152,11 +186,22 @@ namespace NeutriverseWriter
             editor.Font = new Font("Consolas", 11f);
             editor.HideSelection = false;
             editor.AllowDrop = true;
+            editor.VScroll += delegate { SyncPreviewToEditorTopLine(); };
+            editor.MouseWheel += delegate { BeginInvoke(new MethodInvoker(SyncPreviewToEditorTopLine)); };
             editor.TextChanged += delegate
             {
                 if (!applyingHighlight)
                 {
-                    QueuePreview();
+                    if (livePreview)
+                    {
+                        QueuePreview();
+                    }
+                    else
+                    {
+                        previewTimer.Stop();
+                        previewDirty = true;
+                        SetStatus("Manual preview mode: click Refresh to update preview.");
+                    }
                     QueueHighlight();
                     UpdateWindowTitle();
                 }
@@ -196,6 +241,11 @@ namespace NeutriverseWriter
                 ApplyEditorHighlight();
             };
 
+            scrollSyncTimer = new Timer();
+            scrollSyncTimer.Interval = 250;
+            scrollSyncTimer.Tick += delegate { PollPreviewScrollSync(); };
+            scrollSyncTimer.Start();
+
             Shown += delegate
             {
                 split.Panel1MinSize = 320;
@@ -220,30 +270,44 @@ namespace NeutriverseWriter
             toolbar.RenderMode = ToolStripRenderMode.Professional;
             toolbar.Renderer = new NeutriverseToolStripRenderer();
 
-            AddButton(toolbar, "New", delegate { NewDraft(); });
-            AddButton(toolbar, "Open", delegate { OpenPost(); });
-            AddButton(toolbar, "Save", delegate { SavePost(false); });
-            AddButton(toolbar, "Save As", delegate { SavePost(true); });
+            AddDropdown(toolbar, "File", new Dictionary<string, EventHandler>
+            {
+                { "New", delegate { NewDraft(); } },
+                { "Open", delegate { OpenPost(); } },
+                { "Save", delegate { SavePost(false); } },
+                { "Save As", delegate { SavePost(true); } }
+            });
             toolbar.Items.Add(new ToolStripSeparator());
             AddButton(toolbar, "Insert Image", delegate { InsertImagesFromDialog(); });
             AddButton(toolbar, "Refresh", delegate { RenderPreview(); });
+            previewModeButton = AddToggleButton(toolbar, "Live", delegate { TogglePreviewMode(); });
+            previewModeButton.Checked = true;
             eyeButton = AddToggleButton(toolbar, "Eye", delegate { ToggleComfortMode(); });
             toolbar.Items.Add(new ToolStripSeparator());
 
-            AddButton(toolbar, "H1", delegate { PrefixLines("# "); });
-            AddButton(toolbar, "H2", delegate { PrefixLines("## "); });
-            AddButton(toolbar, "H3", delegate { PrefixLines("### "); });
+            AddDropdown(toolbar, "H", new Dictionary<string, EventHandler>
+            {
+                { "H1", delegate { PrefixLines("# "); } },
+                { "H2", delegate { PrefixLines("## "); } },
+                { "H3", delegate { PrefixLines("### "); } }
+            });
             AddButton(toolbar, "Quote", delegate { PrefixLines("> "); });
-            AddButton(toolbar, "UL", delegate { PrefixLines("- "); });
-            AddButton(toolbar, "OL", delegate { NumberLines(); });
+            AddDropdown(toolbar, "List", new Dictionary<string, EventHandler>
+            {
+                { "Unordered", delegate { PrefixLines("- "); } },
+                { "Ordered", delegate { NumberLines(); } }
+            });
             AddDropdown(toolbar, "Table", new Dictionary<string, EventHandler>
             {
                 { "2 columns", delegate { InsertTable(2, 2); } },
                 { "3 columns", delegate { InsertTable(3, 3); } },
                 { "4 columns", delegate { InsertTable(4, 3); } }
             });
-            AddButton(toolbar, "Code", delegate { WrapSelection("`", "`"); });
-            AddButton(toolbar, "Code Block", delegate { WrapSelection("```" + Environment.NewLine, Environment.NewLine + "```"); });
+            AddDropdown(toolbar, "Code", new Dictionary<string, EventHandler>
+            {
+                { "Inline Code", delegate { WrapSelection("`", "`"); } },
+                { "Code Block", delegate { WrapSelection("```" + Environment.NewLine, Environment.NewLine + "```"); } }
+            });
             toolbar.Items.Add(new ToolStripSeparator());
 
             AddButton(toolbar, "B", delegate { WrapSelection("**", "**"); });
@@ -672,8 +736,44 @@ namespace NeutriverseWriter
 
         private void QueuePreview()
         {
+            if (!livePreview)
+            {
+                previewDirty = true;
+                return;
+            }
+
             previewTimer.Stop();
             previewTimer.Start();
+        }
+
+        private void TogglePreviewMode()
+        {
+            livePreview = !livePreview;
+            if (!livePreview)
+            {
+                previewTimer.Stop();
+                scrollSyncTimer.Stop();
+            }
+            else
+            {
+                lastPreviewScrollTop = GetPreviewScrollTop();
+                scrollSyncTimer.Start();
+            }
+            if (previewModeButton != null)
+            {
+                previewModeButton.Checked = livePreview;
+                previewModeButton.Text = livePreview ? "Live" : "Manual";
+                previewModeButton.Width = Math.Max(62, TextRenderer.MeasureText(previewModeButton.Text, previewModeButton.Font).Width + 20);
+            }
+
+            if (livePreview && previewDirty)
+            {
+                RenderPreview();
+            }
+            else
+            {
+                SetStatus(livePreview ? "Live preview mode enabled." : "Manual preview mode enabled.");
+            }
         }
 
         private Color GetEditorBackColor()
@@ -735,10 +835,13 @@ namespace NeutriverseWriter
 
             int start = editor.SelectionStart;
             int length = editor.SelectionLength;
+            var scroll = new NativePoint();
             applyingHighlight = true;
 
             try
             {
+                SendMessage(editor.Handle, EM_GETSCROLLPOS, IntPtr.Zero, ref scroll);
+                SendMessage(editor.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
                 editor.SuspendLayout();
                 editor.SelectAll();
                 editor.SelectionColor = GetEditorTextColor();
@@ -758,10 +861,13 @@ namespace NeutriverseWriter
                 editor.SelectionStart = Math.Min(start, editor.TextLength);
                 editor.SelectionLength = Math.Min(length, editor.TextLength - editor.SelectionStart);
                 editor.SelectionColor = GetEditorTextColor();
+                SendMessage(editor.Handle, EM_SETSCROLLPOS, IntPtr.Zero, ref scroll);
             }
             finally
             {
                 editor.ResumeLayout();
+                SendMessage(editor.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+                editor.Invalidate();
                 applyingHighlight = false;
             }
         }
@@ -781,13 +887,152 @@ namespace NeutriverseWriter
 
         private void RenderPreview()
         {
+            CapturePreviewScroll();
             string html = BuildHtml(editor.Text);
+            previewDirty = false;
             preview.DocumentText = html;
+            SetStatus(livePreview ? "Preview refreshed." : "Manual preview refreshed.");
+        }
+
+        private void CapturePreviewScroll()
+        {
+            restorePreviewScroll = false;
+            pendingPreviewScroll = Point.Empty;
+            if (preview.Document == null || preview.Document.Window == null)
+            {
+                return;
+            }
+
+            try
+            {
+                int x = Convert.ToInt32(preview.Document.InvokeScript("eval", new object[] { "document.documentElement.scrollLeft || document.body.scrollLeft || 0" }));
+                int y = Convert.ToInt32(preview.Document.InvokeScript("eval", new object[] { "document.documentElement.scrollTop || document.body.scrollTop || 0" }));
+                pendingPreviewScroll = new Point(x, y);
+                restorePreviewScroll = true;
+            }
+            catch
+            {
+                restorePreviewScroll = false;
+            }
+        }
+
+        private void SyncPreviewToEditorTopLine()
+        {
+            if (!livePreview || syncingScroll || DateTime.Now < ignoreScrollSyncUntil || preview.Document == null)
+            {
+                return;
+            }
+
+            int charIndex = editor.GetCharIndexFromPosition(new Point(2, 2));
+            int line = editor.GetLineFromCharIndex(charIndex);
+            try
+            {
+                syncingScroll = true;
+                preview.Document.InvokeScript("nwScrollToSourceLine", new object[] { line });
+                lastPreviewScrollTop = GetPreviewScrollTop();
+                ignoreScrollSyncUntil = DateTime.Now.AddMilliseconds(350);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                syncingScroll = false;
+            }
+        }
+
+        private void PollPreviewScrollSync()
+        {
+            if (!livePreview || syncingScroll || DateTime.Now < ignoreScrollSyncUntil || preview.Document == null)
+            {
+                return;
+            }
+
+            int scrollTop = GetPreviewScrollTop();
+            if (scrollTop < 0)
+            {
+                return;
+            }
+
+            if (lastPreviewScrollTop < 0)
+            {
+                lastPreviewScrollTop = scrollTop;
+                return;
+            }
+
+            if (Math.Abs(scrollTop - lastPreviewScrollTop) < 8)
+            {
+                return;
+            }
+
+            lastPreviewScrollTop = scrollTop;
+            int line = GetPreviewTopSourceLine();
+            if (line >= 0)
+            {
+                ScrollEditorToLine(line);
+            }
+        }
+
+        private int GetPreviewScrollTop()
+        {
+            try
+            {
+                object value = preview.Document.InvokeScript("eval", new object[] { "document.documentElement.scrollTop || document.body.scrollTop || 0" });
+                return Convert.ToInt32(value);
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private int GetPreviewTopSourceLine()
+        {
+            try
+            {
+                object value = preview.Document.InvokeScript("nwTopSourceLine");
+                return Convert.ToInt32(value);
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private void ScrollEditorToLine(int line)
+        {
+            if (line < 0 || line >= editor.Lines.Length)
+            {
+                return;
+            }
+
+            try
+            {
+                syncingScroll = true;
+                int firstChar = editor.GetFirstCharIndexFromLine(line);
+                if (firstChar < 0)
+                {
+                    return;
+                }
+
+                int currentFirst = editor.GetLineFromCharIndex(editor.GetCharIndexFromPosition(new Point(2, 2)));
+                int delta = line - currentFirst;
+                if (delta != 0)
+                {
+                    SendMessage(editor.Handle, 0x00B6, IntPtr.Zero, new IntPtr(delta));
+                    ignoreScrollSyncUntil = DateTime.Now.AddMilliseconds(350);
+                }
+            }
+            finally
+            {
+                syncingScroll = false;
+            }
         }
 
         private string BuildHtml(string source)
         {
             string body = StripFrontMatter(source);
+            int bodyStartLine = GetBodyStartLine(source);
             string mediaSubpath = GetFrontMatterValue(source, "media_subpath");
             string cssPath = Path.Combine(repoRoot, "assets", "css", "ChirpyDefault.css");
             string css = File.Exists(cssPath) ? File.ReadAllText(cssPath, Encoding.UTF8) : "";
@@ -819,16 +1064,21 @@ namespace NeutriverseWriter
                 ".nv-underline{display:inline;border-bottom:.08em solid currentColor!important;text-decoration:none!important;padding-bottom:.04em}.nv-dotted{display:inline;border-bottom:.1em dotted currentColor!important;text-decoration:none!important;padding-bottom:.04em}.nv-wavy{display:inline;border-bottom:.1em solid currentColor!important;text-decoration:none!important;padding-bottom:.04em}" +
                 ".nv-mark,.nv-mark-gold{background:rgba(216,183,106,.20)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}.nv-mark-red{background:rgba(255,125,125,.18)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}.nv-mark-blue{background:rgba(143,183,255,.18)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}.nv-mark-green{background:rgba(130,217,130,.16)!important;color:#dce8f7!important;padding:.05em .22em;border-radius:.18em}" +
                 ".nv-key{border:0;border-bottom:2px solid currentColor;background:transparent!important;color:#d8b76a!important;padding:.02em .18em;font-weight:600}.nv-spoiler{background:currentColor!important;color:#c9d1d9!important;border-radius:.18em;padding:.05em .22em}.nv-spoiler:hover{background:rgba(255,255,255,.08)!important;color:#c9d1d9!important}";
+            string syncScript =
+                "<script>" +
+                "function nwScrollToSourceLine(line){var nodes=document.querySelectorAll('[data-src-line]');if(!nodes.length)return;var target=nodes[0];for(var i=0;i<nodes.length;i++){var n=parseInt(nodes[i].getAttribute('data-src-line'),10);if(n>=line){target=nodes[i];break;}target=nodes[i];}target.scrollIntoView(true);}" +
+                "function nwTopSourceLine(){var nodes=document.querySelectorAll('[data-src-line]');if(!nodes.length)return -1;var best=nodes[0],bestDist=999999;for(var i=0;i<nodes.length;i++){var r=nodes[i].getBoundingClientRect();var d=Math.abs(r.top);if(r.bottom>=0&&d<bestDist){best=nodes[i];bestDist=d;}}return parseInt(best.getAttribute('data-src-line'),10);}" +
+                "</script>";
 
             return "<!doctype html><html data-mode=\"dark\"><head><meta charset=\"utf-8\"><meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"><style>" +
                    css +
                    baseCss +
                    "</style></head><body><article class=\"content\"><h1>" + title + "</h1>" +
-                   RenderMarkdown(body, mediaSubpath) +
-                   "</article></body></html>";
+                   RenderMarkdown(body, mediaSubpath, bodyStartLine) +
+                   "</article>" + syncScript + "</body></html>";
         }
 
-        private string RenderMarkdown(string body, string mediaSubpath)
+        private string RenderMarkdown(string body, string mediaSubpath, int bodyStartLine)
         {
             var output = new StringBuilder();
             var paragraph = new StringBuilder();
@@ -837,13 +1087,19 @@ namespace NeutriverseWriter
             bool inOrderedList = false;
             var tableRows = new List<string>();
             var quoteLines = new List<string>();
+            int paragraphSourceLine = -1;
+            int tableSourceLine = -1;
+            int quoteSourceLine = -1;
+            int codeSourceLine = -1;
 
             Action flushParagraph = delegate
             {
                 if (paragraph.Length > 0)
                 {
-                    output.Append("<p>").Append(RenderInline(paragraph.ToString().Trim(), mediaSubpath)).AppendLine("</p>");
+                    output.Append("<p").Append(SourceLineAttr(paragraphSourceLine)).Append(">")
+                        .Append(RenderInline(paragraph.ToString().Trim(), mediaSubpath)).AppendLine("</p>");
                     paragraph.Length = 0;
+                    paragraphSourceLine = -1;
                 }
             };
 
@@ -868,13 +1124,14 @@ namespace NeutriverseWriter
                     return;
                 }
 
-                output.AppendLine("<blockquote>");
+                output.Append("<blockquote").Append(SourceLineAttr(quoteSourceLine)).AppendLine(">");
                 foreach (string quoteLine in quoteLines)
                 {
                     output.Append("<p>").Append(RenderInline(quoteLine.Trim(), mediaSubpath)).AppendLine("</p>");
                 }
                 output.AppendLine("</blockquote>");
                 quoteLines.Clear();
+                quoteSourceLine = -1;
             };
 
             Action flushTable = delegate
@@ -884,7 +1141,7 @@ namespace NeutriverseWriter
                     return;
                 }
 
-                output.AppendLine("<table>");
+                output.Append("<table").Append(SourceLineAttr(tableSourceLine)).AppendLine(">");
                 bool headerWritten = false;
                 bool bodyOpen = false;
                 foreach (string tableLine in tableRows)
@@ -927,10 +1184,14 @@ namespace NeutriverseWriter
                 }
                 output.AppendLine("</table>");
                 tableRows.Clear();
+                tableSourceLine = -1;
             };
 
-            foreach (string raw in body.Replace("\r\n", "\n").Split('\n'))
+            string[] rawLines = body.Replace("\r\n", "\n").Split('\n');
+            for (int i = 0; i < rawLines.Length; i++)
             {
+                string raw = rawLines[i];
+                int sourceLine = bodyStartLine + i;
                 string line = raw.TrimEnd();
                 string trimmed = line.Trim();
 
@@ -942,7 +1203,8 @@ namespace NeutriverseWriter
                     flushQuote();
                     if (!inCode)
                     {
-                        output.AppendLine("<pre><code>");
+                        codeSourceLine = sourceLine;
+                        output.Append("<pre").Append(SourceLineAttr(codeSourceLine)).AppendLine("><code>");
                         inCode = true;
                     }
                     else
@@ -973,6 +1235,10 @@ namespace NeutriverseWriter
                     flushParagraph();
                     closeList();
                     flushQuote();
+                    if (tableSourceLine < 0)
+                    {
+                        tableSourceLine = sourceLine;
+                    }
                     tableRows.Add(trimmed);
                     continue;
                 }
@@ -996,7 +1262,7 @@ namespace NeutriverseWriter
                     closeList();
                     flushQuote();
                     int level = heading.Groups[1].Value.Length;
-                    output.Append("<h").Append(level).Append(">")
+                    output.Append("<h").Append(level).Append(SourceLineAttr(sourceLine)).Append(">")
                         .Append(RenderInline(heading.Groups[2].Value, mediaSubpath))
                         .Append("</h").Append(level).AppendLine(">");
                     continue;
@@ -1006,6 +1272,10 @@ namespace NeutriverseWriter
                 {
                     flushParagraph();
                     closeList();
+                    if (quoteSourceLine < 0)
+                    {
+                        quoteSourceLine = sourceLine;
+                    }
                     quoteLines.Add(trimmed.TrimStart('>', ' '));
                     continue;
                 }
@@ -1022,7 +1292,7 @@ namespace NeutriverseWriter
                     }
                     if (!inList)
                     {
-                        output.AppendLine("<ul>");
+                        output.Append("<ul").Append(SourceLineAttr(sourceLine)).AppendLine(">");
                         inList = true;
                     }
                     output.Append("<li>").Append(RenderInline(bullet.Groups[1].Value, mediaSubpath)).AppendLine("</li>");
@@ -1041,7 +1311,7 @@ namespace NeutriverseWriter
                     }
                     if (!inOrderedList)
                     {
-                        output.AppendLine("<ol>");
+                        output.Append("<ol").Append(SourceLineAttr(sourceLine)).AppendLine(">");
                         inOrderedList = true;
                     }
                     output.Append("<li>").Append(RenderInline(ordered.Groups[1].Value, mediaSubpath)).AppendLine("</li>");
@@ -1051,6 +1321,10 @@ namespace NeutriverseWriter
                 if (paragraph.Length > 0)
                 {
                     paragraph.Append(" ");
+                }
+                else
+                {
+                    paragraphSourceLine = sourceLine;
                 }
                 paragraph.Append(trimmed);
             }
@@ -1104,6 +1378,11 @@ namespace NeutriverseWriter
             }
 
             return true;
+        }
+
+        private static string SourceLineAttr(int line)
+        {
+            return line >= 0 ? " data-src-line=\"" + line + "\"" : "";
         }
 
         private string RenderInline(string text, string mediaSubpath)
@@ -1192,6 +1471,32 @@ namespace NeutriverseWriter
 
             int after = text.IndexOf('\n', close);
             return after >= 0 ? text.Substring(after + 1) : "";
+        }
+
+        private static int GetBodyStartLine(string text)
+        {
+            int close = FindFrontMatterClose(text);
+            if (close < 0)
+            {
+                return 0;
+            }
+
+            int after = text.IndexOf('\n', close);
+            if (after < 0)
+            {
+                return 0;
+            }
+
+            int line = 0;
+            for (int i = 0; i <= after && i < text.Length; i++)
+            {
+                if (text[i] == '\n')
+                {
+                    line++;
+                }
+            }
+
+            return line;
         }
 
         private static string GetFrontMatterValue(string text, string key)

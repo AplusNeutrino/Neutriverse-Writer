@@ -30,6 +30,7 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 
 - Neutriverse-styled dark UI with logo blue and gold accents.
 - Application icon based on the Neutriverse site logo.
+- Live and manual preview modes. Manual mode keeps the preview still until Refresh is clicked.
 - Left pane: dark live preview using site-like article typography.
 - Right pane: dark Markdown/HTML source editor with automatic line wrapping, GitHub-like monospace typography, and lightweight syntax highlighting.
 - New/Open/Save/Save As for `_posts/*.md`.
@@ -37,7 +38,7 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 - Image insertion copies files to `assets/img/posts/<date-title>/`.
 - Image insertion adds or reuses `media_subpath`.
 - Inserts Markdown image syntax such as `![alt](image.png)`.
-- Toolbar buttons for headings, blockquotes, unordered lists, ordered lists, tables, inline code, code blocks, bold, italic, underline, strikethrough, and horizontal rules.
+- Grouped toolbar menus for files, headings, lists, tables, inline code, code blocks, bold, italic, underline, strikethrough, and horizontal rules.
 - Dropdowns for Neutriverse text colors, underline styles, mark/background helpers, keys, spoilers, and common HTML inline tags.
 - Preview support for Markdown tables and Neutriverse custom `nv-*` color/mark helpers.
 
