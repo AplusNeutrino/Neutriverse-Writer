@@ -408,6 +408,7 @@ namespace NeutriverseWriter
             }, "File actions. Shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S");
             toolbar.Items.Add(new ToolStripSeparator());
             AddButton(toolbar, "Insert Image", delegate { InsertImagesFromDialog(); }, "Copy image files into the post media folder and insert Markdown image links.");
+            AddButton(toolbar, "Inline Image", delegate { InsertInlineImageFromDialog(); }, "Copy an image into the post media folder and insert a right-aligned inline illustration include. Shortcut: Ctrl+Shift+I");
             AddButton(toolbar, "Refresh", delegate { RenderPreview(); }, "Refresh the preview now. Shortcut: F5");
             AddButton(toolbar, "Publish", delegate { PublishSiteToGitHub(); }, "Commit and push the target blog repository to GitHub.");
             previewModeButton = AddToggleButton(toolbar, "Live", delegate { TogglePreviewMode(); });
@@ -984,6 +985,21 @@ namespace NeutriverseWriter
             }
         }
 
+        private void InsertInlineImageFromDialog()
+        {
+            using (var dialog = new OpenFileDialog())
+            {
+                dialog.Multiselect = true;
+                dialog.Filter = "Images|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp|All files (*.*)|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                InsertInlineImageFiles(dialog.FileNames);
+            }
+        }
+
         private void EditorDragEnter(object sender, DragEventArgs e)
         {
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
@@ -1003,15 +1019,73 @@ namespace NeutriverseWriter
 
         private void InsertImageFiles(IEnumerable<string> files)
         {
-            string text = EnsureMediaSubpath(editor.Text);
-            editor.Text = text;
+            ImageCopyResult copyResult = CopyImagesToPostMedia(files);
+            var inserted = new StringBuilder();
+            foreach (CopiedImage image in copyResult.Images)
+            {
+                inserted.AppendLine("![" + image.Alt + "](" + image.FileName.Replace("\\", "/") + ")");
+                inserted.AppendLine();
+            }
+
+            if (inserted.Length > 0)
+            {
+                InsertAtCursor(inserted.ToString());
+                SetStatus("Inserted image(s) into " + copyResult.TargetDirectory);
+            }
+        }
+
+        private void InsertInlineImageFiles(IEnumerable<string> files)
+        {
+            string selectedAlt = NormalizeInlineImageText(editor.SelectedText);
+            ImageCopyResult copyResult = CopyImagesToPostMedia(files);
+            var inserted = new StringBuilder();
+            foreach (CopiedImage image in copyResult.Images)
+            {
+                string alt = string.IsNullOrWhiteSpace(selectedAlt) || copyResult.Images.Count > 1 ? image.Alt : selectedAlt;
+                inserted.AppendLine("{% include inline-image.html");
+                inserted.AppendLine("  src=\"" + EscapeLiquidParameter(copyResult.MediaSubpath.TrimEnd('/') + "/" + image.FileName.Replace("\\", "/")) + "\"");
+                inserted.AppendLine("  alt=\"" + EscapeLiquidParameter(alt) + "\"");
+                inserted.AppendLine("  align=\"right\"");
+                inserted.AppendLine("%}");
+                inserted.AppendLine();
+            }
+
+            if (inserted.Length > 0)
+            {
+                InsertAtCursor(inserted.ToString());
+                SetStatus("Inserted inline illustration(s) into " + copyResult.TargetDirectory);
+            }
+        }
+
+        private ImageCopyResult CopyImagesToPostMedia(IEnumerable<string> files)
+        {
+            string originalText = editor.Text;
+            int originalSelectionStart = editor.SelectionStart;
+            int originalSelectionLength = editor.SelectionLength;
+            int frontMatterClose = FindFrontMatterClose(originalText);
+            string text = EnsureMediaSubpath(originalText);
+            if (!string.Equals(originalText, text, StringComparison.Ordinal))
+            {
+                int delta = text.Length - originalText.Length;
+                editor.Text = text;
+                if (delta > 0 && frontMatterClose >= 0 && originalSelectionStart >= frontMatterClose)
+                {
+                    originalSelectionStart += delta;
+                }
+                originalSelectionStart = Math.Min(originalSelectionStart, editor.TextLength);
+                originalSelectionLength = Math.Min(originalSelectionLength, editor.TextLength - originalSelectionStart);
+                editor.Select(originalSelectionStart, originalSelectionLength);
+            }
 
             string mediaSubpath = GetFrontMatterValue(editor.Text, "media_subpath");
             string relativeFolder = mediaSubpath.Trim('/').Replace('/', Path.DirectorySeparatorChar);
             string targetDir = Path.Combine(repoRoot, relativeFolder);
             Directory.CreateDirectory(targetDir);
 
-            var inserted = new StringBuilder();
+            var result = new ImageCopyResult();
+            result.MediaSubpath = mediaSubpath;
+            result.TargetDirectory = targetDir;
+
             foreach (string source in files)
             {
                 if (!File.Exists(source) || !IsImage(source))
@@ -1021,16 +1095,14 @@ namespace NeutriverseWriter
 
                 string name = UniqueFileName(targetDir, SanitizeFileName(Path.GetFileName(source)));
                 File.Copy(source, Path.Combine(targetDir, name), false);
-                string alt = Path.GetFileNameWithoutExtension(name);
-                inserted.AppendLine("![" + alt + "](" + name.Replace("\\", "/") + ")");
-                inserted.AppendLine();
+                result.Images.Add(new CopiedImage
+                {
+                    FileName = name,
+                    Alt = Path.GetFileNameWithoutExtension(name)
+                });
             }
 
-            if (inserted.Length > 0)
-            {
-                InsertAtCursor(inserted.ToString());
-                SetStatus("Inserted image(s) into " + targetDir);
-            }
+            return result;
         }
 
         private string EnsureMediaSubpath(string text)
@@ -1065,6 +1137,16 @@ namespace NeutriverseWriter
             }
 
             return text.Insert(close, "media_subpath: " + folder + Environment.NewLine);
+        }
+
+        private static string NormalizeInlineImageText(string text)
+        {
+            return Regex.Replace((text ?? "").Trim(), "\\s+", " ");
+        }
+
+        private static string EscapeLiquidParameter(string value)
+        {
+            return NormalizeInlineImageText(value).Replace("\"", "'");
         }
 
         private void InsertAtCursor(string text)
@@ -1234,6 +1316,12 @@ namespace NeutriverseWriter
             if (keyData == (Keys.Control | Keys.E))
             {
                 ToggleComfortMode();
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.Shift | Keys.I))
+            {
+                InsertInlineImageFromDialog();
                 return true;
             }
 
@@ -1557,6 +1645,7 @@ namespace NeutriverseWriter
                 ".content h1{font-size:2.05rem}.content h2{font-size:1.65rem}.content h3{font-size:1.35rem}.content h4{font-size:1.18rem}" +
                 "strong{font-weight:700;color:" + previewHeading + ";} em{font-style:italic;} del{text-decoration:line-through;} u{text-decoration:underline;}" +
                 "a{color:#8fb7ff;} img{max-width:100%;height:auto;border-radius:.35rem;}" +
+                ".content .inline-illustration{box-sizing:border-box;float:right;width:42%;max-width:320px;margin:.15rem 0 1rem 1.5rem}.content .inline-illustration.inline-left{float:left;margin:.15rem 1.5rem 1rem 0}.content .inline-illustration img{display:block;width:100%;max-width:100%;height:auto}.content .inline-illustration figcaption{margin-top:.45rem;color:#9aa4b2;font-size:.85rem;line-height:1.35}.content h2,.content h3{clear:both}@media(max-width:720px){.content .inline-illustration,.content .inline-illustration.inline-left{float:none;width:100%;max-width:100%;margin:1rem 0}}" +
                 "hr{height:1px;margin:2rem 0;border:0;background:#30363d;}" +
                 ".content ul,.content ol{margin:0 0 1rem 1.35rem;padding-left:1.25rem}.content li{margin:.35rem 0}.content li::marker{color:#9aa4b2;}" +
                 ".content blockquote{margin:1.2rem 0 1.2rem 1rem;padding:.1rem 0 .1rem 1rem;border-left:.22rem solid #4f6fff!important;background:transparent!important;color:" + previewText + "!important;}" +
@@ -1735,6 +1824,24 @@ namespace NeutriverseWriter
                     continue;
                 }
 
+                if (trimmed.StartsWith("{% include inline-image.html", StringComparison.Ordinal))
+                {
+                    flushParagraph();
+                    closeList();
+                    flushTable();
+                    flushQuote();
+                    var include = new StringBuilder();
+                    include.AppendLine(trimmed);
+                    while (!trimmed.Contains("%}") && i + 1 < rawLines.Length)
+                    {
+                        i++;
+                        trimmed = rawLines[i].Trim();
+                        include.AppendLine(trimmed);
+                    }
+                    output.Append(RenderInlineImageInclude(include.ToString(), mediaSubpath, sourceLine));
+                    continue;
+                }
+
                 if (IsTableLine(trimmed))
                 {
                     flushParagraph();
@@ -1888,6 +1995,57 @@ namespace NeutriverseWriter
         private static string SourceLineAttr(int line)
         {
             return line >= 0 ? " data-src-line=\"" + line + "\"" : "";
+        }
+
+        private string RenderInlineImageInclude(string includeText, string mediaSubpath, int sourceLine)
+        {
+            Dictionary<string, string> attributes = ParseIncludeAttributes(includeText);
+            string src;
+            if (!attributes.TryGetValue("src", out src) || string.IsNullOrWhiteSpace(src))
+            {
+                return "";
+            }
+
+            string alt;
+            attributes.TryGetValue("alt", out alt);
+            string caption;
+            attributes.TryGetValue("caption", out caption);
+            string href;
+            attributes.TryGetValue("href", out href);
+            string align;
+            attributes.TryGetValue("align", out align);
+
+            string figureClass = "inline-illustration" + (string.Equals(align, "left", StringComparison.OrdinalIgnoreCase) ? " inline-left" : "");
+            string resolvedSrc = ResolveImageSource(src, mediaSubpath);
+            string resolvedHref = string.IsNullOrWhiteSpace(href) ? "" : ResolveImageSource(href, mediaSubpath);
+
+            var output = new StringBuilder();
+            output.Append("<figure").Append(SourceLineAttr(sourceLine)).Append(" class=\"").Append(figureClass).Append("\">");
+            if (!string.IsNullOrWhiteSpace(resolvedHref))
+            {
+                output.Append("<a href=\"").Append(WebUtility.HtmlEncode(resolvedHref)).Append("\">");
+            }
+            output.Append("<img src=\"").Append(WebUtility.HtmlEncode(resolvedSrc)).Append("\" alt=\"").Append(WebUtility.HtmlEncode(alt ?? "")).Append("\">");
+            if (!string.IsNullOrWhiteSpace(resolvedHref))
+            {
+                output.Append("</a>");
+            }
+            if (!string.IsNullOrWhiteSpace(caption))
+            {
+                output.Append("<figcaption>").Append(WebUtility.HtmlEncode(caption)).Append("</figcaption>");
+            }
+            output.AppendLine("</figure>");
+            return output.ToString();
+        }
+
+        private static Dictionary<string, string> ParseIncludeAttributes(string includeText)
+        {
+            var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match match in Regex.Matches(includeText, "(\\w+)\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')"))
+            {
+                attributes[match.Groups[1].Value] = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[3].Value;
+            }
+            return attributes;
         }
 
         private string RenderInline(string text, string mediaSubpath)
@@ -2088,6 +2246,19 @@ namespace NeutriverseWriter
             public string Output = "";
             public string Error = "";
             public bool Success { get { return ExitCode == 0; } }
+        }
+
+        private sealed class CopiedImage
+        {
+            public string FileName = "";
+            public string Alt = "";
+        }
+
+        private sealed class ImageCopyResult
+        {
+            public string MediaSubpath = "";
+            public string TargetDirectory = "";
+            public List<CopiedImage> Images = new List<CopiedImage>();
         }
 
         private static GitResult RunGit(string arguments, string workingDirectory, int timeoutMilliseconds)
