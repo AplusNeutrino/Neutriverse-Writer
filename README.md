@@ -31,6 +31,8 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 - Neutriverse-styled dark UI with logo blue and gold accents.
 - Application icon based on the Neutriverse site logo.
 - Live and manual preview modes. Manual mode keeps the preview still until Refresh is clicked.
+- Publish button for the target blog repository. It can save the current post, stage the current post/media or all detected blog changes, commit, fetch/rebase, and push `origin main`.
+- If the current Markdown file is outside the target blog repository, Publish can import it into `_posts/YYYY-MM-DD-slug.md` before committing.
 - Left pane: dark live preview using site-like article typography.
 - Right pane: dark Markdown/HTML source editor with automatic line wrapping, GitHub-like monospace typography, and lightweight syntax highlighting.
 - New/Open/Save/Save As for `_posts/*.md`.
@@ -47,3 +49,11 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 Current source snapshot: v1.1 in progress.
 
 The preview is intended as a close writing preview, not a byte-for-byte Jekyll renderer.
+
+## Publishing
+
+The Publish action runs against the target blog repository passed to the app at launch. It does not store credentials or tokens; it relies on the local Git/GitHub authentication already configured on the machine.
+
+Before pushing, it runs `git diff --cached --check`. If `git rebase origin/main` reports conflicts, the push stops and no force push is attempted.
+
+If the current file is outside the blog repository, Publish asks whether to import it into `_posts`. The default imported filename is generated from front matter `date` and `title`.

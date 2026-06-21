@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -33,6 +34,12 @@ namespace NeutriverseWriter
         private readonly RichTextBox editor;
         private readonly StatusStrip statusStrip;
         private readonly ToolStripStatusLabel status;
+        private readonly ToolStripStatusLabel documentStatus;
+        private readonly ToolStripStatusLabel previewStatus;
+        private readonly ToolStripStatusLabel caretStatus;
+        private readonly ToolStripStatusLabel countStatus;
+        private readonly Label previewHeader;
+        private readonly Label sourceHeader;
         private readonly Timer previewTimer;
         private readonly Timer highlightTimer;
         private readonly Timer scrollSyncTimer;
@@ -172,7 +179,9 @@ namespace NeutriverseWriter
                     preview.Document.Window.ScrollTo(pendingPreviewScroll.X, pendingPreviewScroll.Y);
                 }
             };
-            split.Panel1.Controls.Add(preview);
+            previewHeader = CreatePaneHeader("PREVIEW", "Live");
+            var previewPanel = CreatePanePanel(previewHeader, preview);
+            split.Panel1.Controls.Add(previewPanel);
 
             editor = new RichTextBox();
             editor.Dock = DockStyle.Fill;
@@ -204,11 +213,15 @@ namespace NeutriverseWriter
                     }
                     QueueHighlight();
                     UpdateWindowTitle();
+                    UpdateUiState();
                 }
             };
+            editor.SelectionChanged += delegate { UpdateUiState(); };
             editor.DragEnter += EditorDragEnter;
             editor.DragDrop += EditorDragDrop;
-            split.Panel2.Controls.Add(editor);
+            sourceHeader = CreatePaneHeader("SOURCE", "Untitled");
+            var editorPanel = CreatePanePanel(sourceHeader, editor);
+            split.Panel2.Controls.Add(editorPanel);
 
             Controls.Add(split);
             split.BringToFront();
@@ -221,7 +234,21 @@ namespace NeutriverseWriter
             status = new ToolStripStatusLabel();
             status.ForeColor = TextMuted;
             status.Font = new Font("Segoe UI", 9f);
+            status.Spring = true;
+            status.TextAlign = ContentAlignment.MiddleLeft;
+            documentStatus = CreateStatusLabel();
+            previewStatus = CreateStatusLabel();
+            caretStatus = CreateStatusLabel();
+            countStatus = CreateStatusLabel();
+            documentStatus.ToolTipText = "Document save state";
+            previewStatus.ToolTipText = "Preview mode and refresh state";
+            caretStatus.ToolTipText = "Current editor line, column, and selection";
+            countStatus.ToolTipText = "Document length summary";
             statusStrip.Items.Add(status);
+            statusStrip.Items.Add(documentStatus);
+            statusStrip.Items.Add(previewStatus);
+            statusStrip.Items.Add(caretStatus);
+            statusStrip.Items.Add(countStatus);
             Controls.Add(statusStrip);
             FormClosing += MainForm_FormClosing;
 
@@ -256,6 +283,106 @@ namespace NeutriverseWriter
             NewDraft();
         }
 
+        private Label CreatePaneHeader(string title, string detail)
+        {
+            var label = new Label();
+            label.Dock = DockStyle.Top;
+            label.Height = 30;
+            label.Padding = new Padding(12, 0, 12, 0);
+            label.BackColor = SurfaceRaised;
+            label.ForeColor = TextMuted;
+            label.Font = new Font("Segoe UI", 8.75f, FontStyle.Bold);
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            label.Text = FormatPaneHeader(title, detail);
+            return label;
+        }
+
+        private Panel CreatePanePanel(Label header, Control content)
+        {
+            var panel = new Panel();
+            panel.Dock = DockStyle.Fill;
+            panel.BackColor = Surface;
+            panel.Padding = new Padding(0);
+            content.Dock = DockStyle.Fill;
+            panel.Controls.Add(content);
+            panel.Controls.Add(header);
+            return panel;
+        }
+
+        private ToolStripStatusLabel CreateStatusLabel()
+        {
+            var label = new ToolStripStatusLabel();
+            label.ForeColor = TextMuted;
+            label.Font = new Font("Segoe UI", 9f);
+            label.BorderSides = ToolStripStatusLabelBorderSides.Left;
+            label.BorderStyle = Border3DStyle.Flat;
+            label.Padding = new Padding(10, 0, 8, 0);
+            return label;
+        }
+
+        private static string FormatPaneHeader(string title, string detail)
+        {
+            return string.IsNullOrWhiteSpace(detail) ? title : title + "  /  " + detail;
+        }
+
+        private void UpdateUiState()
+        {
+            if (previewHeader != null)
+            {
+                previewHeader.Text = FormatPaneHeader("PREVIEW", (livePreview ? "Live" : "Manual") + (previewDirty ? " | Stale" : "") + (comfortMode ? " | Eye" : ""));
+                previewHeader.ForeColor = previewDirty ? LogoGold : TextMuted;
+            }
+
+            if (sourceHeader != null)
+            {
+                string name = string.IsNullOrWhiteSpace(currentFile) ? "Untitled" : Path.GetFileName(currentFile);
+                sourceHeader.Text = FormatPaneHeader("SOURCE", name + (HasUnsavedChanges() ? " | Unsaved" : " | Saved"));
+                sourceHeader.ForeColor = HasUnsavedChanges() ? LogoGold : TextMuted;
+            }
+
+            if (documentStatus != null)
+            {
+                documentStatus.Text = HasUnsavedChanges() ? "Unsaved" : "Saved";
+                documentStatus.ForeColor = HasUnsavedChanges() ? LogoGold : TextMuted;
+            }
+
+            if (previewStatus != null)
+            {
+                previewStatus.Text = livePreview ? "Live preview" : (previewDirty ? "Manual preview | stale" : "Manual preview");
+                previewStatus.ForeColor = previewDirty ? LogoGold : TextMuted;
+            }
+
+            if (countStatus != null && editor != null)
+            {
+                int lineCount = editor.Lines.Length;
+                int wordCount = CountReadableWords(editor.Text);
+                int charCount = editor.Text.Count(c => !char.IsWhiteSpace(c));
+                countStatus.Text = lineCount + " lines | " + wordCount + " words | " + charCount + " chars";
+            }
+
+            if (caretStatus != null && editor != null)
+            {
+                int safeSelectionStart = Math.Min(editor.SelectionStart, editor.TextLength);
+                int lineIndex = editor.GetLineFromCharIndex(safeSelectionStart);
+                int lineStart = editor.GetFirstCharIndexFromLine(lineIndex);
+                int column = lineStart >= 0 ? safeSelectionStart - lineStart + 1 : 1;
+                string selection = editor.SelectionLength > 0 ? " | Sel " + editor.SelectionLength : "";
+                caretStatus.Text = "Ln " + (lineIndex + 1) + ", Col " + column + selection;
+            }
+        }
+
+        private static int CountReadableWords(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return 0;
+            }
+
+            int latinWords = Regex.Matches(text, @"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*").Count;
+            int cjkCharacters = Regex.Matches(text, @"[\u3400-\u9FFF]").Count;
+            return latinWords + cjkCharacters;
+        }
+
         private ToolStrip BuildToolbar()
         {
             var toolbar = new ToolStrip();
@@ -269,54 +396,59 @@ namespace NeutriverseWriter
             toolbar.Font = new Font("Segoe UI", 9.5f);
             toolbar.RenderMode = ToolStripRenderMode.Professional;
             toolbar.Renderer = new NeutriverseToolStripRenderer();
+            toolbar.CanOverflow = true;
+            toolbar.ShowItemToolTips = true;
 
             AddDropdown(toolbar, "File", new Dictionary<string, EventHandler>
             {
-                { "New", delegate { NewDraft(); } },
-                { "Open", delegate { OpenPost(); } },
+                { "New Draft", delegate { NewDraft(); } },
+                { "Open Post", delegate { OpenPost(); } },
                 { "Save", delegate { SavePost(false); } },
-                { "Save As", delegate { SavePost(true); } }
-            });
+                { "Save As...", delegate { SavePost(true); } }
+            }, "File actions. Shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S");
             toolbar.Items.Add(new ToolStripSeparator());
-            AddButton(toolbar, "Insert Image", delegate { InsertImagesFromDialog(); });
-            AddButton(toolbar, "Refresh", delegate { RenderPreview(); });
+            AddButton(toolbar, "Insert Image", delegate { InsertImagesFromDialog(); }, "Copy image files into the post media folder and insert Markdown image links.");
+            AddButton(toolbar, "Refresh", delegate { RenderPreview(); }, "Refresh the preview now. Shortcut: F5");
+            AddButton(toolbar, "Publish", delegate { PublishSiteToGitHub(); }, "Commit and push the target blog repository to GitHub.");
             previewModeButton = AddToggleButton(toolbar, "Live", delegate { TogglePreviewMode(); });
+            previewModeButton.ToolTipText = "Toggle live preview. Shortcut: Ctrl+L";
             previewModeButton.Checked = true;
             eyeButton = AddToggleButton(toolbar, "Eye", delegate { ToggleComfortMode(); });
+            eyeButton.ToolTipText = "Toggle eye comfort mode. Shortcut: Ctrl+E";
             toolbar.Items.Add(new ToolStripSeparator());
 
-            AddDropdown(toolbar, "H", new Dictionary<string, EventHandler>
+            AddDropdown(toolbar, "Heading", new Dictionary<string, EventHandler>
             {
                 { "H1", delegate { PrefixLines("# "); } },
                 { "H2", delegate { PrefixLines("## "); } },
                 { "H3", delegate { PrefixLines("### "); } }
-            });
-            AddButton(toolbar, "Quote", delegate { PrefixLines("> "); });
+            }, "Heading levels");
+            AddButton(toolbar, "Quote", delegate { PrefixLines("> "); }, "Turn selected lines into a quote block.");
             AddDropdown(toolbar, "List", new Dictionary<string, EventHandler>
             {
                 { "Unordered", delegate { PrefixLines("- "); } },
                 { "Ordered", delegate { NumberLines(); } }
-            });
+            }, "List formatting");
             AddDropdown(toolbar, "Table", new Dictionary<string, EventHandler>
             {
                 { "2 columns", delegate { InsertTable(2, 2); } },
                 { "3 columns", delegate { InsertTable(3, 3); } },
                 { "4 columns", delegate { InsertTable(4, 3); } }
-            });
+            }, "Insert Markdown table");
             AddDropdown(toolbar, "Code", new Dictionary<string, EventHandler>
             {
                 { "Inline Code", delegate { WrapSelection("`", "`"); } },
                 { "Code Block", delegate { WrapSelection("```" + Environment.NewLine, Environment.NewLine + "```"); } }
-            });
+            }, "Code formatting");
             toolbar.Items.Add(new ToolStripSeparator());
 
-            AddButton(toolbar, "B", delegate { WrapSelection("**", "**"); });
-            AddButton(toolbar, "I", delegate { WrapSelection("*", "*"); });
-            AddButton(toolbar, "U", delegate { WrapSelection("<u>", "</u>"); });
-            AddButton(toolbar, "S", delegate { WrapSelection("~~", "~~"); });
+            AddButton(toolbar, "B", delegate { WrapSelection("**", "**"); }, "Bold");
+            AddButton(toolbar, "I", delegate { WrapSelection("*", "*"); }, "Italic");
+            AddButton(toolbar, "U", delegate { WrapSelection("<u>", "</u>"); }, "Underline");
+            AddButton(toolbar, "S", delegate { WrapSelection("~~", "~~"); }, "Strikethrough");
             toolbar.Items.Add(new ToolStripSeparator());
 
-            AddDropdown(toolbar, "Text Color", new Dictionary<string, EventHandler>
+            AddDropdown(toolbar, "Color", new Dictionary<string, EventHandler>
             {
                 { "Red", delegate { WrapSpan("nv-red"); } },
                 { "Orange", delegate { WrapSpan("nv-orange"); } },
@@ -327,7 +459,7 @@ namespace NeutriverseWriter
                 { "Purple", delegate { WrapSpan("nv-purple"); } },
                 { "Pink", delegate { WrapSpan("nv-pink"); } },
                 { "Muted", delegate { WrapSpan("nv-muted"); } }
-            });
+            }, "Neutriverse text colors");
 
             AddDropdown(toolbar, "Underline", new Dictionary<string, EventHandler>
             {
@@ -337,7 +469,7 @@ namespace NeutriverseWriter
                 { "Red Plain", delegate { WrapSpan("nv-red nv-underline"); } },
                 { "Blue Wavy", delegate { WrapSpan("nv-blue nv-wavy"); } },
                 { "Gold Dotted", delegate { WrapSpan("nv-gold nv-dotted"); } }
-            });
+            }, "Underline styles");
 
             AddDropdown(toolbar, "Mark", new Dictionary<string, EventHandler>
             {
@@ -347,7 +479,7 @@ namespace NeutriverseWriter
                 { "Green Mark", delegate { WrapSpan("nv-mark-green"); } },
                 { "Key", delegate { WrapSpan("nv-key"); } },
                 { "Spoiler", delegate { WrapSpan("nv-spoiler"); } }
-            });
+            }, "Neutriverse marks and semantic inline helpers");
 
             AddDropdown(toolbar, "HTML", new Dictionary<string, EventHandler>
             {
@@ -357,15 +489,21 @@ namespace NeutriverseWriter
                 { "Keyboard", delegate { WrapSelection("<kbd>", "</kbd>"); } },
                 { "Break", delegate { InsertAtCursor("<br>"); } },
                 { "Horizontal Rule", delegate { InsertAtCursor(Environment.NewLine + "---" + Environment.NewLine); } }
-            });
+            }, "Common inline HTML helpers");
 
             return toolbar;
         }
 
         private ToolStripButton AddButton(ToolStrip toolbar, string text, EventHandler click)
         {
+            return AddButton(toolbar, text, click, text);
+        }
+
+        private ToolStripButton AddButton(ToolStrip toolbar, string text, EventHandler click, string tooltip)
+        {
             var button = new ToolStripButton(text);
             StyleToolButton(button, toolbar, text);
+            button.ToolTipText = tooltip;
             button.Click += click;
             toolbar.Items.Add(button);
             return button;
@@ -394,6 +532,11 @@ namespace NeutriverseWriter
 
         private void AddDropdown(ToolStrip toolbar, string text, Dictionary<string, EventHandler> items)
         {
+            AddDropdown(toolbar, text, items, text);
+        }
+
+        private void AddDropdown(ToolStrip toolbar, string text, Dictionary<string, EventHandler> items, string tooltip)
+        {
             var dropdown = new ToolStripDropDownButton(text);
             dropdown.AutoSize = false;
             dropdown.Width = Math.Max(44, TextRenderer.MeasureText(text, toolbar.Font).Width + 26);
@@ -402,6 +545,7 @@ namespace NeutriverseWriter
             dropdown.Margin = new Padding(1, 0, 1, 0);
             dropdown.DisplayStyle = ToolStripItemDisplayStyle.Text;
             dropdown.ForeColor = TextPrimary;
+            dropdown.ToolTipText = tooltip;
             dropdown.DropDown.BackColor = SurfaceRaised;
             dropdown.DropDown.ForeColor = TextPrimary;
             dropdown.DropDown.Padding = new Padding(4);
@@ -505,7 +649,7 @@ namespace NeutriverseWriter
                 {
                     dialog.InitialDirectory = postsDir;
                     dialog.Filter = "Markdown posts (*.md)|*.md|All files (*.*)|*.*";
-                    dialog.FileName = date + "-" + SanitizeFileName(title) + ".md";
+                    dialog.FileName = date + "-" + SanitizePostSlug(title) + ".md";
                     if (dialog.ShowDialog(this) != DialogResult.OK)
                     {
                         return false;
@@ -521,6 +665,308 @@ namespace NeutriverseWriter
             UpdateWindowTitle();
             SetStatus("Saved " + currentFile);
             return true;
+        }
+
+        private void PublishSiteToGitHub()
+        {
+            if (!Directory.Exists(Path.Combine(repoRoot, ".git")))
+            {
+                MessageBox.Show(this, "The target blog folder is not a git repository:" + Environment.NewLine + repoRoot, "Neutriverse Writer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!EnsureCurrentPostIsInBlogRepository())
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(currentFile) || !File.Exists(currentFile))
+            {
+                MessageBox.Show(this, "Save the post before publishing.", "Neutriverse Writer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            GitResult statusResult = RunGit("status --short", repoRoot, 30000);
+            if (!statusResult.Success)
+            {
+                ShowGitOutput("Could not read blog repository status.", statusResult);
+                return;
+            }
+
+            string statusText = statusResult.Output.Trim();
+            if (string.IsNullOrWhiteSpace(statusText))
+            {
+                DialogResult pushOnly = MessageBox.Show(this, "No local changes were found in the blog repository. Push existing commits anyway?", "Publish to GitHub", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (pushOnly != DialogResult.Yes)
+                {
+                    return;
+                }
+
+                RunPublishPushOnly();
+                return;
+            }
+
+            DialogResult scope = MessageBox.Show(
+                this,
+                "Blog repository changes:" + Environment.NewLine + Environment.NewLine +
+                statusText + Environment.NewLine + Environment.NewLine +
+                "Yes: publish all listed changes." + Environment.NewLine +
+                "No: publish only the current post and its media folder." + Environment.NewLine +
+                "Cancel: stop.",
+                "Publish to GitHub",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            if (scope == DialogResult.Cancel)
+            {
+                return;
+            }
+
+            string defaultMessage = "Publish " + Path.GetFileNameWithoutExtension(currentFile);
+            string commitMessage = PromptForText("Commit message", "Commit message for AplusNeutrino/My_Blog:", defaultMessage);
+            if (string.IsNullOrWhiteSpace(commitMessage))
+            {
+                return;
+            }
+
+            bool includeAll = scope == DialogResult.Yes;
+            Cursor previousCursor = Cursor.Current;
+            Cursor.Current = Cursors.WaitCursor;
+            UseWaitCursor = true;
+            try
+            {
+                SetStatus("Publishing blog repository...");
+
+                GitResult addResult = includeAll ? RunGit("add -A", repoRoot, 60000) : StageCurrentPostFiles();
+                if (!addResult.Success)
+                {
+                    ShowGitOutput("Failed to stage files.", addResult);
+                    return;
+                }
+
+                GitResult cachedCheck = RunGit("diff --cached --check", repoRoot, 60000);
+                if (!cachedCheck.Success)
+                {
+                    ShowGitOutput("git diff --cached --check failed. Fix whitespace/errors before publishing.", cachedCheck);
+                    return;
+                }
+
+                GitResult cachedDiff = RunGit("diff --cached --quiet", repoRoot, 60000);
+                if (cachedDiff.ExitCode == 0)
+                {
+                    MessageBox.Show(this, "No staged changes were found for publishing.", "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                GitResult commitResult = RunGit("commit -m " + QuoteArg(commitMessage), repoRoot, 120000);
+                if (!commitResult.Success)
+                {
+                    ShowGitOutput("Commit failed.", commitResult);
+                    return;
+                }
+
+                if (!RunFetchRebasePush())
+                {
+                    return;
+                }
+
+                MessageBox.Show(this, "Published to GitHub." + Environment.NewLine + Environment.NewLine + commitResult.Output.Trim(), "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                SetStatus("Published to GitHub.");
+            }
+            finally
+            {
+                UseWaitCursor = false;
+                Cursor.Current = previousCursor;
+            }
+        }
+
+        private void RunPublishPushOnly()
+        {
+            Cursor previousCursor = Cursor.Current;
+            Cursor.Current = Cursors.WaitCursor;
+            UseWaitCursor = true;
+            try
+            {
+                SetStatus("Pushing blog repository...");
+                if (RunFetchRebasePush())
+                {
+                    MessageBox.Show(this, "Pushed blog repository to GitHub.", "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    SetStatus("Pushed to GitHub.");
+                }
+            }
+            finally
+            {
+                UseWaitCursor = false;
+                Cursor.Current = previousCursor;
+            }
+        }
+
+        private bool RunFetchRebasePush()
+        {
+            GitResult fetchResult = RunGit("-c http.version=HTTP/1.1 fetch origin main", repoRoot, 120000);
+            if (!fetchResult.Success)
+            {
+                ShowGitOutput("Fetch failed.", fetchResult);
+                return false;
+            }
+
+            GitResult rebaseResult = RunGit("rebase origin/main", repoRoot, 120000);
+            if (!rebaseResult.Success)
+            {
+                ShowGitOutput("Rebase failed. Resolve conflicts in the blog repository before publishing again. No force push was attempted.", rebaseResult);
+                return false;
+            }
+
+            GitResult pushResult = RunGit("push origin main", repoRoot, 120000);
+            if (!pushResult.Success)
+            {
+                ShowGitOutput("Push failed.", pushResult);
+                return false;
+            }
+
+            return true;
+        }
+
+        private GitResult StageCurrentPostFiles()
+        {
+            var paths = new List<string>();
+            paths.Add(currentFile);
+
+            string mediaSubpath = GetFrontMatterValue(editor.Text, "media_subpath");
+            if (!string.IsNullOrWhiteSpace(mediaSubpath))
+            {
+                string mediaDir = Path.Combine(repoRoot, mediaSubpath.Trim('/').Replace('/', Path.DirectorySeparatorChar));
+                if (Directory.Exists(mediaDir))
+                {
+                    paths.Add(mediaDir);
+                }
+            }
+
+            var args = new StringBuilder("add --");
+            foreach (string path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                args.Append(" ").Append(QuoteArg(path));
+            }
+
+            return RunGit(args.ToString(), repoRoot, 60000);
+        }
+
+        private bool EnsureCurrentPostIsInBlogRepository()
+        {
+            if (string.IsNullOrWhiteSpace(currentFile))
+            {
+                return ImportCurrentPostToBlogRepository("This draft has not been saved into the blog repository.");
+            }
+
+            if (HasUnsavedChanges() && IsPathInsideDirectory(currentFile, repoRoot))
+            {
+                return SavePost(false);
+            }
+
+            if (IsPathInsideDirectory(currentFile, repoRoot))
+            {
+                return true;
+            }
+
+            return ImportCurrentPostToBlogRepository(
+                "The current file is outside the blog repository:" + Environment.NewLine +
+                currentFile + Environment.NewLine + Environment.NewLine +
+                "Import it into _posts before publishing?");
+        }
+
+        private bool ImportCurrentPostToBlogRepository(string message)
+        {
+            DialogResult result = MessageBox.Show(
+                this,
+                message + Environment.NewLine + Environment.NewLine +
+                "Writer will save a copy to the blog repository _posts folder and publish that copy.",
+                "Import to blog repository",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (result != DialogResult.Yes)
+            {
+                return false;
+            }
+
+            if (!HasFrontMatter(editor.Text))
+            {
+                MessageBox.Show(this, "The post needs YAML front matter before it can be imported.", "Import to blog repository", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            string targetPath = BuildDefaultPostPath(editor.Text);
+            if (File.Exists(targetPath))
+            {
+                using (var dialog = new SaveFileDialog())
+                {
+                    dialog.InitialDirectory = postsDir;
+                    dialog.Filter = "Markdown posts (*.md)|*.md|All files (*.*)|*.*";
+                    dialog.FileName = Path.GetFileName(targetPath);
+                    dialog.Title = "Import post to blog repository";
+                    if (dialog.ShowDialog(this) != DialogResult.OK)
+                    {
+                        return false;
+                    }
+
+                    targetPath = dialog.FileName;
+                }
+            }
+
+            if (!IsPathInsideDirectory(targetPath, repoRoot))
+            {
+                MessageBox.Show(this, "The import target must be inside the blog repository.", "Import to blog repository", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
+            File.WriteAllText(targetPath, editor.Text, new UTF8Encoding(false));
+            currentFile = targetPath;
+            savedTextSnapshot = editor.Text;
+            UpdateWindowTitle();
+            SetStatus("Imported post to " + targetPath);
+            return true;
+        }
+
+        private string BuildDefaultPostPath(string text)
+        {
+            string date = GetFrontMatterValue(text, "date");
+            if (date.Length >= 10)
+            {
+                date = date.Substring(0, 10);
+            }
+            else
+            {
+                date = DateTime.Now.ToString("yyyy-MM-dd");
+            }
+
+            string title = GetFrontMatterValue(text, "title");
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                title = "new-post";
+            }
+
+            string fileName = date + "-" + SanitizePostSlug(title) + ".md";
+            return Path.Combine(postsDir, fileName);
+        }
+
+        private static bool IsPathInsideDirectory(string path, string directory)
+        {
+            if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(directory))
+            {
+                return false;
+            }
+
+            try
+            {
+                string fullPath = Path.GetFullPath(path);
+                string fullDirectory = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                return fullPath.StartsWith(fullDirectory, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void InsertImagesFromDialog()
@@ -739,11 +1185,59 @@ namespace NeutriverseWriter
             if (!livePreview)
             {
                 previewDirty = true;
+                UpdateUiState();
                 return;
             }
 
             previewTimer.Stop();
             previewTimer.Start();
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.N))
+            {
+                NewDraft();
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.O))
+            {
+                OpenPost();
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.S))
+            {
+                SavePost(false);
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.Shift | Keys.S))
+            {
+                SavePost(true);
+                return true;
+            }
+
+            if (keyData == Keys.F5)
+            {
+                RenderPreview();
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.L))
+            {
+                TogglePreviewMode();
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.E))
+            {
+                ToggleComfortMode();
+                return true;
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         private void TogglePreviewMode()
@@ -774,6 +1268,7 @@ namespace NeutriverseWriter
             {
                 SetStatus(livePreview ? "Live preview mode enabled." : "Manual preview mode enabled.");
             }
+            UpdateUiState();
         }
 
         private Color GetEditorBackColor()
@@ -810,6 +1305,7 @@ namespace NeutriverseWriter
             RenderPreview();
             QueueHighlight();
             SetStatus(comfortMode ? "Eye comfort mode enabled." : "Eye comfort mode disabled.");
+            UpdateUiState();
         }
 
         private void ApplyEditorTheme()
@@ -818,6 +1314,14 @@ namespace NeutriverseWriter
             editor.ForeColor = GetEditorTextColor();
             editor.SelectionColor = editor.ForeColor;
             split.Panel2.BackColor = editor.BackColor;
+            if (sourceHeader != null)
+            {
+                sourceHeader.BackColor = comfortMode ? Color.FromArgb(38, 37, 31) : SurfaceRaised;
+            }
+            if (previewHeader != null)
+            {
+                previewHeader.BackColor = comfortMode ? Color.FromArgb(38, 37, 31) : SurfaceRaised;
+            }
         }
 
         private void QueueHighlight()
@@ -892,6 +1396,7 @@ namespace NeutriverseWriter
             previewDirty = false;
             preview.DocumentText = html;
             SetStatus(livePreview ? "Preview refreshed." : "Manual preview refreshed.");
+            UpdateUiState();
         }
 
         private void CapturePreviewScroll()
@@ -1537,10 +2042,17 @@ namespace NeutriverseWriter
             return Regex.Replace(name.Trim(), "\\s+", "-");
         }
 
+        private static string SanitizePostSlug(string title)
+        {
+            string cleaned = SanitizeFileName(title).ToLowerInvariant();
+            cleaned = Regex.Replace(cleaned, @"[^\w\u3400-\u9fff\-]+", "-");
+            cleaned = Regex.Replace(cleaned, "-+", "-").Trim('-');
+            return string.IsNullOrWhiteSpace(cleaned) ? "new-post" : cleaned;
+        }
+
         private static string SanitizeFolderSegment(string name)
         {
-            string cleaned = SanitizeFileName(name).ToLowerInvariant();
-            cleaned = Regex.Replace(cleaned, "-+", "-").Trim('-');
+            string cleaned = SanitizePostSlug(name);
             return string.IsNullOrWhiteSpace(cleaned) ? "post" : cleaned;
         }
 
@@ -1568,6 +2080,131 @@ namespace NeutriverseWriter
         private void SetStatus(string message)
         {
             status.Text = message;
+        }
+
+        private sealed class GitResult
+        {
+            public int ExitCode;
+            public string Output = "";
+            public string Error = "";
+            public bool Success { get { return ExitCode == 0; } }
+        }
+
+        private static GitResult RunGit(string arguments, string workingDirectory, int timeoutMilliseconds)
+        {
+            var result = new GitResult();
+            try
+            {
+                var startInfo = new ProcessStartInfo();
+                startInfo.FileName = "git";
+                startInfo.Arguments = arguments;
+                startInfo.WorkingDirectory = workingDirectory;
+                startInfo.UseShellExecute = false;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                startInfo.CreateNoWindow = true;
+                startInfo.StandardOutputEncoding = Encoding.UTF8;
+                startInfo.StandardErrorEncoding = Encoding.UTF8;
+
+                using (var process = Process.Start(startInfo))
+                {
+                    if (process == null)
+                    {
+                        result.ExitCode = -1;
+                        result.Error = "Could not start git.";
+                        return result;
+                    }
+
+                    if (!process.WaitForExit(timeoutMilliseconds))
+                    {
+                        try
+                        {
+                            process.Kill();
+                        }
+                        catch
+                        {
+                        }
+                        result.ExitCode = -1;
+                        result.Error = "git " + arguments + " timed out.";
+                        return result;
+                    }
+
+                    result.Output = process.StandardOutput.ReadToEnd();
+                    result.Error = process.StandardError.ReadToEnd();
+                    result.ExitCode = process.ExitCode;
+                }
+            }
+            catch (Exception ex)
+            {
+                result.ExitCode = -1;
+                result.Error = ex.ToString();
+            }
+
+            return result;
+        }
+
+        private static string QuoteArg(string value)
+        {
+            return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        }
+
+        private void ShowGitOutput(string title, GitResult result)
+        {
+            string output = (result.Output ?? "").Trim();
+            string error = (result.Error ?? "").Trim();
+            string message = title + Environment.NewLine + Environment.NewLine +
+                "Exit code: " + result.ExitCode + Environment.NewLine + Environment.NewLine +
+                (output.Length > 0 ? "Output:" + Environment.NewLine + output + Environment.NewLine + Environment.NewLine : "") +
+                (error.Length > 0 ? "Error:" + Environment.NewLine + error : "");
+
+            MessageBox.Show(this, message, "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            SetStatus(title);
+        }
+
+        private string PromptForText(string title, string prompt, string defaultValue)
+        {
+            using (var form = new Form())
+            using (var label = new Label())
+            using (var textBox = new TextBox())
+            using (var okButton = new Button())
+            using (var cancelButton = new Button())
+            {
+                form.Text = title;
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.MinimizeBox = false;
+                form.MaximizeBox = false;
+                form.ClientSize = new Size(520, 136);
+                form.BackColor = Surface;
+                form.ForeColor = TextPrimary;
+
+                label.Text = prompt;
+                label.SetBounds(14, 14, 492, 22);
+                label.ForeColor = TextMuted;
+
+                textBox.Text = defaultValue;
+                textBox.SetBounds(14, 44, 492, 26);
+                textBox.BackColor = GetEditorBackColor();
+                textBox.ForeColor = GetEditorTextColor();
+                textBox.BorderStyle = BorderStyle.FixedSingle;
+
+                okButton.Text = "OK";
+                okButton.DialogResult = DialogResult.OK;
+                okButton.SetBounds(326, 92, 84, 28);
+
+                cancelButton.Text = "Cancel";
+                cancelButton.DialogResult = DialogResult.Cancel;
+                cancelButton.SetBounds(422, 92, 84, 28);
+
+                form.Controls.Add(label);
+                form.Controls.Add(textBox);
+                form.Controls.Add(okButton);
+                form.Controls.Add(cancelButton);
+                form.AcceptButton = okButton;
+                form.CancelButton = cancelButton;
+
+                return form.ShowDialog(this) == DialogResult.OK ? textBox.Text.Trim() : "";
+            }
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
@@ -1614,6 +2251,7 @@ namespace NeutriverseWriter
         {
             string name = string.IsNullOrWhiteSpace(currentFile) ? "Untitled" : Path.GetFileName(currentFile);
             Text = (HasUnsavedChanges() ? "* " : "") + name + " - Neutriverse Writer";
+            UpdateUiState();
         }
 
         private sealed class NeutriverseToolStripRenderer : ToolStripProfessionalRenderer
