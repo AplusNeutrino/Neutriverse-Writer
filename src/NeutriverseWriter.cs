@@ -25,6 +25,8 @@ namespace NeutriverseWriter
         private const int WM_SETREDRAW = 0x000B;
         private const int EM_GETSCROLLPOS = 0x04DD;
         private const int EM_SETSCROLLPOS = 0x04DE;
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
+        private const int HTCAPTION = 0x0002;
 
         private readonly string repoRoot;
         private readonly string postsDir;
@@ -69,6 +71,9 @@ namespace NeutriverseWriter
 
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref NativePoint lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
 
         [STAThread]
         public static void Main(string[] args)
@@ -411,6 +416,7 @@ namespace NeutriverseWriter
             AddButton(toolbar, "Inline Image", delegate { InsertInlineImageFromDialog(); }, "Copy an image into the post media folder and insert a right-aligned inline illustration include. Shortcut: Ctrl+Shift+I");
             AddButton(toolbar, "Refresh", delegate { RenderPreview(); }, "Refresh the preview now. Shortcut: F5");
             AddButton(toolbar, "Publish", delegate { PublishSiteToGitHub(); }, "Commit and push the target blog repository to GitHub.");
+            AddButton(toolbar, "Guide", delegate { OpenRoamGuidePanel(); }, "Quick edit Neutriverse roam guide info, orbit, and stack data.");
             previewModeButton = AddToggleButton(toolbar, "Live", delegate { TogglePreviewMode(); });
             previewModeButton.ToolTipText = "Toggle live preview. Shortcut: Ctrl+L";
             previewModeButton.Checked = true;
@@ -731,94 +737,147 @@ namespace NeutriverseWriter
             }
 
             bool includeAll = scope == DialogResult.Yes;
-            Cursor previousCursor = Cursor.Current;
-            Cursor.Current = Cursors.WaitCursor;
-            UseWaitCursor = true;
-            try
+            using (var progress = new PublishProgressForm("Publishing Blog Post"))
             {
-                SetStatus("Publishing blog repository...");
-
-                GitResult addResult = includeAll ? RunGit("add -A", repoRoot, 60000) : StageCurrentPostFiles();
-                if (!addResult.Success)
+                progress.Show(this);
+                Cursor previousCursor = Cursor.Current;
+                Cursor.Current = Cursors.WaitCursor;
+                UseWaitCursor = true;
+                try
                 {
-                    ShowGitOutput("Failed to stage files.", addResult);
-                    return;
-                }
+                    SetStatus("Publishing blog repository...");
 
-                GitResult cachedCheck = RunGit("diff --cached --check", repoRoot, 60000);
-                if (!cachedCheck.Success)
+                    GitResult addResult = includeAll ? RunGitStep(progress, "Stage all blog changes", "add -A", repoRoot, 60000) : StageCurrentPostFiles(progress);
+                    if (!addResult.Success)
+                    {
+                        ShowGitOutput("Failed to stage files.", addResult);
+                        return;
+                    }
+
+                    GitResult cachedCheck = RunGitStep(progress, "Check staged diff", "diff --cached --check", repoRoot, 60000);
+                    if (!cachedCheck.Success)
+                    {
+                        ShowGitOutput("git diff --cached --check failed. Fix whitespace/errors before publishing.", cachedCheck);
+                        return;
+                    }
+
+                    GitResult cachedDiff = RunGitStep(progress, "Confirm staged changes", "diff --cached --quiet", repoRoot, 60000);
+                    if (cachedDiff.ExitCode == 0)
+                    {
+                        if (HasLocalCommitsToPush(progress))
+                        {
+                            progress.AppendLog("No new staged post diff, but local commits are waiting to be pushed.");
+                            if (!RunFetchRebasePush(progress))
+                            {
+                                return;
+                            }
+                            progress.MarkComplete("Pushed existing local commits.");
+                            MessageBox.Show(this, "Pushed existing local commits to GitHub.", "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            SetStatus("Pushed existing local commits.");
+                            return;
+                        }
+
+                        MessageBox.Show(this, "No staged changes were found for publishing.", "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+
+                    GitResult commitResult = RunGitStep(progress, "Commit blog update", "commit -m " + QuoteArg(commitMessage), repoRoot, 120000);
+                    if (!commitResult.Success)
+                    {
+                        ShowGitOutput("Commit failed.", commitResult);
+                        return;
+                    }
+
+                    if (!RunFetchRebasePush(progress))
+                    {
+                        return;
+                    }
+
+                    progress.MarkComplete("Published to GitHub.");
+                    MessageBox.Show(this, "Published to GitHub." + Environment.NewLine + Environment.NewLine + commitResult.Output.Trim(), "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    SetStatus("Published to GitHub.");
+                }
+                finally
                 {
-                    ShowGitOutput("git diff --cached --check failed. Fix whitespace/errors before publishing.", cachedCheck);
-                    return;
+                    UseWaitCursor = false;
+                    Cursor.Current = previousCursor;
                 }
-
-                GitResult cachedDiff = RunGit("diff --cached --quiet", repoRoot, 60000);
-                if (cachedDiff.ExitCode == 0)
-                {
-                    MessageBox.Show(this, "No staged changes were found for publishing.", "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                GitResult commitResult = RunGit("commit -m " + QuoteArg(commitMessage), repoRoot, 120000);
-                if (!commitResult.Success)
-                {
-                    ShowGitOutput("Commit failed.", commitResult);
-                    return;
-                }
-
-                if (!RunFetchRebasePush())
-                {
-                    return;
-                }
-
-                MessageBox.Show(this, "Published to GitHub." + Environment.NewLine + Environment.NewLine + commitResult.Output.Trim(), "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                SetStatus("Published to GitHub.");
-            }
-            finally
-            {
-                UseWaitCursor = false;
-                Cursor.Current = previousCursor;
             }
         }
 
         private void RunPublishPushOnly()
         {
-            Cursor previousCursor = Cursor.Current;
-            Cursor.Current = Cursors.WaitCursor;
-            UseWaitCursor = true;
-            try
+            using (var progress = new PublishProgressForm("Pushing Blog Repository"))
             {
-                SetStatus("Pushing blog repository...");
-                if (RunFetchRebasePush())
+                progress.Show(this);
+                Cursor previousCursor = Cursor.Current;
+                Cursor.Current = Cursors.WaitCursor;
+                UseWaitCursor = true;
+                try
                 {
-                    MessageBox.Show(this, "Pushed blog repository to GitHub.", "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    SetStatus("Pushed to GitHub.");
+                    SetStatus("Pushing blog repository...");
+                    if (RunFetchRebasePush(progress))
+                    {
+                        progress.MarkComplete("Pushed to GitHub.");
+                        MessageBox.Show(this, "Pushed blog repository to GitHub.", "Publish to GitHub", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        SetStatus("Pushed to GitHub.");
+                    }
                 }
-            }
-            finally
-            {
-                UseWaitCursor = false;
-                Cursor.Current = previousCursor;
+                finally
+                {
+                    UseWaitCursor = false;
+                    Cursor.Current = previousCursor;
+                }
             }
         }
 
         private bool RunFetchRebasePush()
         {
-            GitResult fetchResult = RunGit("-c http.version=HTTP/1.1 fetch origin main", repoRoot, 120000);
+            return RunFetchRebasePush(null);
+        }
+
+        private bool RunFetchRebasePush(PublishProgressForm progress)
+        {
+            GitResult fetchResult = null;
+            string[] fetchAttempts = new string[]
+            {
+                "-c http.version=HTTP/1.1 fetch origin main",
+                "-c http.version=HTTP/1.1 -c http.lowSpeedLimit=0 fetch --prune origin main",
+                "-c http.version=HTTP/1.1 fetch --no-tags origin main"
+            };
+
+            for (int attempt = 0; attempt < fetchAttempts.Length; attempt++)
+            {
+                fetchResult = RunGitStep(progress, "Fetch origin/main (" + (attempt + 1) + "/" + fetchAttempts.Length + ")", fetchAttempts[attempt], repoRoot, 120000);
+                if (fetchResult.Success)
+                {
+                    break;
+                }
+
+                if (attempt + 1 < fetchAttempts.Length)
+                {
+                    if (progress != null)
+                    {
+                        progress.AppendLog("Fetch failed; retrying with a safer transport option.");
+                    }
+                    System.Threading.Thread.Sleep(1100);
+                }
+            }
+
             if (!fetchResult.Success)
             {
                 ShowGitOutput("Fetch failed.", fetchResult);
                 return false;
             }
 
-            GitResult rebaseResult = RunGit("rebase origin/main", repoRoot, 120000);
+            GitResult rebaseResult = RunGitStep(progress, "Rebase on origin/main", "rebase origin/main", repoRoot, 120000);
             if (!rebaseResult.Success)
             {
                 ShowGitOutput("Rebase failed. Resolve conflicts in the blog repository before publishing again. No force push was attempted.", rebaseResult);
                 return false;
             }
 
-            GitResult pushResult = RunGit("push origin main", repoRoot, 120000);
+            GitResult pushResult = RunGitStep(progress, "Push origin main", "push origin main", repoRoot, 120000);
             if (!pushResult.Success)
             {
                 ShowGitOutput("Push failed.", pushResult);
@@ -829,6 +888,11 @@ namespace NeutriverseWriter
         }
 
         private GitResult StageCurrentPostFiles()
+        {
+            return StageCurrentPostFiles(null);
+        }
+
+        private GitResult StageCurrentPostFiles(PublishProgressForm progress)
         {
             var paths = new List<string>();
             paths.Add(currentFile);
@@ -849,7 +913,7 @@ namespace NeutriverseWriter
                 args.Append(" ").Append(QuoteArg(path));
             }
 
-            return RunGit(args.ToString(), repoRoot, 60000);
+            return RunGitStep(progress, "Stage current post and media", args.ToString(), repoRoot, 60000);
         }
 
         private bool EnsureCurrentPostIsInBlogRepository()
@@ -968,6 +1032,752 @@ namespace NeutriverseWriter
             {
                 return false;
             }
+        }
+
+        private void OpenRoamGuidePanel()
+        {
+            string aboutPath = GetRoamGuidePath();
+            if (!File.Exists(aboutPath))
+            {
+                MessageBox.Show(this, "Could not find roam guide page:" + Environment.NewLine + aboutPath, "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            RoamGuideData data;
+            try
+            {
+                data = LoadRoamGuideData(aboutPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            using (var form = new Form())
+            {
+                form.Text = "Neutriverse Roam Guide";
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.MinimumSize = new Size(880, 640);
+                form.ClientSize = new Size(980, 720);
+                form.BackColor = Surface;
+                form.ForeColor = TextPrimary;
+                form.FormBorderStyle = FormBorderStyle.None;
+                TrySetFormIcon(form);
+
+                var chrome = new TableLayoutPanel();
+                chrome.Dock = DockStyle.Fill;
+                chrome.BackColor = Surface;
+                chrome.Padding = new Padding(1);
+                chrome.ColumnCount = 1;
+                chrome.RowCount = 4;
+                chrome.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+                chrome.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+                chrome.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                chrome.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+                form.Controls.Add(chrome);
+
+                var header = CreateGuideHeader(form);
+                chrome.Controls.Add(header, 0, 0);
+
+                var nav = new FlowLayoutPanel();
+                nav.Dock = DockStyle.Fill;
+                nav.BackColor = SurfaceRaised;
+                nav.Padding = new Padding(18, 9, 18, 8);
+                nav.FlowDirection = FlowDirection.LeftToRight;
+                nav.WrapContents = false;
+                chrome.Controls.Add(nav, 0, 1);
+
+                var contentHost = new Panel();
+                contentHost.Dock = DockStyle.Fill;
+                contentHost.BackColor = Surface;
+                contentHost.Padding = new Padding(18, 16, 18, 16);
+                chrome.Controls.Add(contentHost, 0, 2);
+
+                var infoKicker = CreateGuideTextBox(data.InfoKicker, false);
+                var infoText = CreateGuideTextBox(data.InfoText, true);
+                var infoPage = CreateGuideInfoPage(infoKicker, infoText);
+
+                var nowKicker = CreateGuideTextBox(data.NowKicker, false);
+                var nowTitle = CreateGuideTextBox(data.NowTitle, false);
+                var nowSummary = CreateGuideTextBox(data.NowSummary, true);
+                var nowUpdated = CreateGuideTextBox(data.NowUpdated, false);
+                var signalGrid = CreateGuideGrid("Label", "Value", data.SignalItems);
+                var statusGrid = CreateGuideGrid("Label", "Value", data.StatusItems);
+                var roadmapGrid = CreateGuideGrid("Step", "Text", data.RoadmapItems);
+                var orbitPage = CreateGuideOrbitPage(nowKicker, nowTitle, nowSummary, nowUpdated, signalGrid, statusGrid, roadmapGrid);
+
+                var readingGrid = CreateGuideGrid("Title", "Date", data.ReadingStackItems);
+                var visualGrid = CreateGuideGrid("Title", "Date", data.VisualStackItems);
+                var stackPage = CreateGuideStackPage(readingGrid, visualGrid);
+
+                contentHost.Controls.Add(infoPage);
+                contentHost.Controls.Add(orbitPage);
+                contentHost.Controls.Add(stackPage);
+
+                var infoButton = CreateGuideNavButton("Info");
+                var orbitButton = CreateGuideNavButton("Orbit");
+                var stackButton = CreateGuideNavButton("Stacks");
+                nav.Controls.Add(infoButton);
+                nav.Controls.Add(orbitButton);
+                nav.Controls.Add(stackButton);
+
+                Action<Panel, Button> showPage = delegate(Panel page, Button selected)
+                {
+                    infoPage.Visible = false;
+                    orbitPage.Visible = false;
+                    stackPage.Visible = false;
+                    page.Visible = true;
+                    StyleGuideNavButton(infoButton, selected == infoButton);
+                    StyleGuideNavButton(orbitButton, selected == orbitButton);
+                    StyleGuideNavButton(stackButton, selected == stackButton);
+                    page.BringToFront();
+                };
+
+                infoButton.Click += delegate { showPage(infoPage, infoButton); };
+                orbitButton.Click += delegate { showPage(orbitPage, orbitButton); };
+                stackButton.Click += delegate { showPage(stackPage, stackButton); };
+                showPage(infoPage, infoButton);
+
+                Action refreshDataFromControls = delegate
+                {
+                    data.InfoKicker = infoKicker.Text.Trim();
+                    data.InfoText = NormalizeMultilineText(infoText.Text);
+                    data.NowKicker = nowKicker.Text.Trim();
+                    data.NowTitle = nowTitle.Text.Trim();
+                    data.NowSummary = NormalizeMultilineText(nowSummary.Text);
+                    data.NowUpdated = nowUpdated.Text.Trim();
+                    data.SignalItems = ReadGuideGrid(signalGrid);
+                    data.StatusItems = ReadGuideGrid(statusGrid);
+                    data.RoadmapItems = ReadGuideGrid(roadmapGrid);
+                    data.ReadingStackItems = ReadGuideGrid(readingGrid);
+                    data.VisualStackItems = ReadGuideGrid(visualGrid);
+                };
+
+                Action saveGuide = delegate
+                {
+                    refreshDataFromControls();
+                    SaveRoamGuideData(aboutPath, data);
+                    SetStatus("Saved roam guide page.");
+                    MessageBox.Show(form, "Saved roam guide page:" + Environment.NewLine + aboutPath, "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                };
+
+                var saveButton = CreateGuideActionButton("Save", false);
+                saveButton.Click += delegate { saveGuide(); };
+
+                var savePublishButton = CreateGuideActionButton("Save && Publish", true);
+                savePublishButton.Click += delegate
+                {
+                    refreshDataFromControls();
+                    SaveRoamGuideData(aboutPath, data);
+                    PublishRoamGuidePage(aboutPath);
+                };
+
+                var reloadButton = CreateGuideActionButton("Reload", false);
+                reloadButton.Click += delegate
+                {
+                    form.DialogResult = DialogResult.Retry;
+                    form.Close();
+                };
+
+                var closeButton = CreateGuideActionButton("Close", false);
+                closeButton.Click += delegate { form.Close(); };
+
+                var buttonPanel = new FlowLayoutPanel();
+                buttonPanel.Dock = DockStyle.Fill;
+                buttonPanel.FlowDirection = FlowDirection.RightToLeft;
+                buttonPanel.Padding = new Padding(18, 10, 18, 10);
+                buttonPanel.BackColor = SurfaceRaised;
+                buttonPanel.Controls.Add(closeButton);
+                buttonPanel.Controls.Add(savePublishButton);
+                buttonPanel.Controls.Add(saveButton);
+                buttonPanel.Controls.Add(reloadButton);
+                chrome.Controls.Add(buttonPanel, 0, 3);
+
+                DialogResult result = form.ShowDialog(this);
+                if (result == DialogResult.Retry)
+                {
+                    OpenRoamGuidePanel();
+                }
+            }
+        }
+
+        private string GetRoamGuidePath()
+        {
+            return Path.Combine(repoRoot, "_tabs", "about.md");
+        }
+
+        private void TrySetFormIcon(Form form)
+        {
+            try
+            {
+                if (Icon != null)
+                {
+                    form.Icon = Icon;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private Panel CreateGuideHeader(Form form)
+        {
+            var header = new Panel();
+            header.Dock = DockStyle.Fill;
+            header.BackColor = Color.FromArgb(13, 15, 20);
+            header.Padding = new Padding(18, 8, 12, 8);
+            header.MouseDown += delegate(object sender, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    ReleaseCapture();
+                    SendMessage(form.Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+                }
+            };
+
+            var title = new Label();
+            title.AutoSize = false;
+            title.Dock = DockStyle.Left;
+            title.Width = 420;
+            title.Text = "Neutriverse Roam Guide";
+            title.TextAlign = ContentAlignment.MiddleLeft;
+            title.ForeColor = TextPrimary;
+            title.Font = new Font("Segoe UI", 12.5f, FontStyle.Bold);
+
+            var subtitle = new Label();
+            subtitle.AutoSize = false;
+            subtitle.Dock = DockStyle.Fill;
+            subtitle.Text = "Info / Orbit / Stack control panel";
+            subtitle.TextAlign = ContentAlignment.MiddleLeft;
+            subtitle.ForeColor = TextMuted;
+            subtitle.Font = new Font("Segoe UI", 9f);
+
+            var close = CreateGuideActionButton("X", false);
+            close.Dock = DockStyle.Right;
+            close.Width = 38;
+            close.Margin = new Padding(0);
+            close.Click += delegate { form.Close(); };
+
+            header.Controls.Add(subtitle);
+            header.Controls.Add(title);
+            header.Controls.Add(close);
+            return header;
+        }
+
+        private Button CreateGuideNavButton(string text)
+        {
+            var button = new Button();
+            button.Text = text;
+            button.Width = 108;
+            button.Height = 32;
+            button.Margin = new Padding(0, 0, 8, 0);
+            button.FlatStyle = FlatStyle.Flat;
+            button.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            button.Cursor = Cursors.Hand;
+            button.UseVisualStyleBackColor = false;
+            StyleGuideNavButton(button, false);
+            return button;
+        }
+
+        private void StyleGuideNavButton(Button button, bool active)
+        {
+            button.BackColor = active ? Color.FromArgb(36, 50, 88) : SurfaceSoft;
+            button.ForeColor = active ? TextPrimary : TextMuted;
+            button.FlatAppearance.BorderColor = active ? LogoGold : Border;
+            button.FlatAppearance.BorderSize = 1;
+            button.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 48, 62);
+            button.FlatAppearance.MouseDownBackColor = Color.FromArgb(31, 43, 75);
+        }
+
+        private Button CreateGuideActionButton(string text, bool primary)
+        {
+            var button = new Button();
+            button.Text = text;
+            button.Width = Math.Max(92, TextRenderer.MeasureText(text, new Font("Segoe UI", 9f, FontStyle.Bold)).Width + 30);
+            button.Height = 32;
+            button.Margin = new Padding(8, 0, 0, 0);
+            button.FlatStyle = FlatStyle.Flat;
+            button.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            button.Cursor = Cursors.Hand;
+            button.UseVisualStyleBackColor = false;
+            button.BackColor = primary ? Color.FromArgb(28, 54, 105) : SurfaceSoft;
+            button.ForeColor = primary ? TextPrimary : TextMuted;
+            button.FlatAppearance.BorderColor = primary ? Color.FromArgb(110, 162, 255) : Border;
+            button.FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(36, 68, 126) : Color.FromArgb(42, 48, 62);
+            button.FlatAppearance.MouseDownBackColor = primary ? Color.FromArgb(22, 44, 88) : Color.FromArgb(31, 36, 47);
+            return button;
+        }
+
+        private Panel CreateGuideInfoPage(TextBox kicker, TextBox infoText)
+        {
+            var page = CreateGuidePagePanel();
+            var layout = CreateGuideTable(4);
+            layout.RowStyles.Clear();
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));
+            AddGuideLabel(layout, "Kicker", 0);
+            layout.Controls.Add(kicker, 1, 0);
+            AddGuideLabel(layout, "Info text", 1);
+            layout.Controls.Add(infoText, 1, 1);
+            layout.SetRowSpan(infoText, 3);
+            page.Controls.Add(layout);
+            return page;
+        }
+
+        private Panel CreateGuideOrbitPage(TextBox kicker, TextBox title, TextBox summary, TextBox updated, DataGridView signal, DataGridView statusItems, DataGridView roadmap)
+        {
+            var page = CreateGuidePagePanel();
+            var root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.BackColor = Surface;
+            root.ColumnCount = 1;
+            root.RowCount = 2;
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 186));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            var top = new TableLayoutPanel();
+            top.Dock = DockStyle.Fill;
+            top.BackColor = Surface;
+            top.ColumnCount = 4;
+            top.RowCount = 3;
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            top.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            top.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            top.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            AddGuideLabel(top, "Kicker", 0, 0);
+            top.Controls.Add(kicker, 1, 0);
+            AddGuideLabel(top, "Updated", 0, 2);
+            top.Controls.Add(updated, 3, 0);
+            AddGuideLabel(top, "Title", 1, 0);
+            top.Controls.Add(title, 1, 1);
+            top.SetColumnSpan(title, 3);
+            AddGuideLabel(top, "Summary", 2, 0);
+            top.Controls.Add(summary, 1, 2);
+            top.SetColumnSpan(summary, 3);
+            root.Controls.Add(top, 0, 0);
+
+            ConfigureCompactGuideGrid(signal);
+            ConfigureCompactGuideGrid(statusItems);
+            ConfigureCompactGuideGrid(roadmap);
+
+            var lower = new TableLayoutPanel();
+            lower.Dock = DockStyle.Fill;
+            lower.BackColor = Surface;
+            lower.ColumnCount = 3;
+            lower.RowCount = 1;
+            lower.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34f));
+            lower.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            lower.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            lower.Controls.Add(CreateGuideGridPanel("Signal", signal), 0, 0);
+            lower.Controls.Add(CreateGuideGridPanel("Status", statusItems), 1, 0);
+            lower.Controls.Add(CreateGuideGridPanel("Roadmap", roadmap), 2, 0);
+            root.Controls.Add(lower, 0, 1);
+
+            page.Controls.Add(root);
+            return page;
+        }
+
+        private Panel CreateGuideStackPage(DataGridView reading, DataGridView visual)
+        {
+            var page = CreateGuidePagePanel();
+            var splitStacks = new SplitContainer();
+            splitStacks.Dock = DockStyle.Fill;
+            splitStacks.Orientation = Orientation.Vertical;
+            splitStacks.SplitterWidth = 4;
+            splitStacks.BackColor = Border;
+
+            splitStacks.Panel1.Controls.Add(CreateGuideGridPanel("Future Reading Stack", reading));
+            splitStacks.Panel2.Controls.Add(CreateGuideGridPanel("Future Media Stack", visual));
+            page.Controls.Add(splitStacks);
+
+            page.Resize += delegate
+            {
+                if (splitStacks.Width > 0)
+                {
+                    splitStacks.SplitterDistance = splitStacks.Width / 2;
+                }
+            };
+
+            return page;
+        }
+
+        private Panel CreateGuidePagePanel()
+        {
+            var page = new Panel();
+            page.Dock = DockStyle.Fill;
+            page.BackColor = Surface;
+            page.ForeColor = TextPrimary;
+            page.Padding = new Padding(0);
+            return page;
+        }
+
+        private TableLayoutPanel CreateGuideTable(int rows)
+        {
+            var layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.BackColor = Surface;
+            layout.ColumnCount = 2;
+            layout.RowCount = rows;
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 126));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < rows; i++)
+            {
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rows));
+            }
+            return layout;
+        }
+
+        private Panel CreateGuideGridPanel(string title, DataGridView grid)
+        {
+            var panel = new Panel();
+            panel.Dock = DockStyle.Fill;
+            panel.BackColor = Surface;
+            panel.Padding = new Padding(0);
+
+            var label = new Label();
+            label.Dock = DockStyle.Top;
+            label.Height = 34;
+            label.Text = title;
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            label.ForeColor = LogoGold;
+            label.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            label.Padding = new Padding(8, 0, 8, 0);
+
+            panel.Controls.Add(grid);
+            panel.Controls.Add(label);
+            return panel;
+        }
+
+        private void AddGuideLabel(TableLayoutPanel layout, string text, int row)
+        {
+            AddGuideLabel(layout, text, row, 0);
+        }
+
+        private void AddGuideLabel(TableLayoutPanel layout, string text, int row, int column)
+        {
+            var label = new Label();
+            label.Text = text;
+            label.Dock = DockStyle.Fill;
+            label.TextAlign = ContentAlignment.TopLeft;
+            label.ForeColor = TextMuted;
+            label.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            label.Padding = new Padding(0, 7, 8, 0);
+            layout.Controls.Add(label, column, row);
+        }
+
+        private TextBox CreateGuideTextBox(string text, bool multiline)
+        {
+            var box = new TextBox();
+            box.Text = text ?? "";
+            box.Dock = DockStyle.Fill;
+            box.Multiline = multiline;
+            box.AcceptsReturn = multiline;
+            box.ScrollBars = multiline ? ScrollBars.Vertical : ScrollBars.None;
+            box.BackColor = GetEditorBackColor();
+            box.ForeColor = GetEditorTextColor();
+            box.BorderStyle = BorderStyle.FixedSingle;
+            box.Font = new Font("Segoe UI", 10f);
+            return box;
+        }
+
+        private DataGridView CreateGuideGrid(string firstHeader, string secondHeader, List<GuidePair> items)
+        {
+            var grid = new DataGridView();
+            grid.Dock = DockStyle.Fill;
+            grid.AllowUserToAddRows = true;
+            grid.AllowUserToDeleteRows = true;
+            grid.AutoGenerateColumns = false;
+            grid.BackgroundColor = Surface;
+            grid.BorderStyle = BorderStyle.FixedSingle;
+            grid.GridColor = Border;
+            grid.RowHeadersVisible = false;
+            grid.SelectionMode = DataGridViewSelectionMode.CellSelect;
+            grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+            grid.DefaultCellStyle.BackColor = GetEditorBackColor();
+            grid.DefaultCellStyle.ForeColor = GetEditorTextColor();
+            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(35, 58, 103);
+            grid.DefaultCellStyle.SelectionForeColor = TextPrimary;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = SurfaceRaised;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = TextPrimary;
+            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            grid.EnableHeadersVisualStyles = false;
+
+            var first = new DataGridViewTextBoxColumn();
+            first.HeaderText = firstHeader;
+            first.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            first.FillWeight = 68;
+            var second = new DataGridViewTextBoxColumn();
+            second.HeaderText = secondHeader;
+            second.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            second.FillWeight = 32;
+            grid.Columns.Add(first);
+            grid.Columns.Add(second);
+
+            foreach (GuidePair item in items)
+            {
+                grid.Rows.Add(item.Label, item.Value);
+            }
+
+            return grid;
+        }
+
+        private void ConfigureCompactGuideGrid(DataGridView grid)
+        {
+            grid.ScrollBars = ScrollBars.None;
+            grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            grid.ColumnHeadersHeight = 24;
+            grid.RowTemplate.Height = 24;
+        }
+
+        private static List<GuidePair> ReadGuideGrid(DataGridView grid)
+        {
+            var items = new List<GuidePair>();
+            foreach (DataGridViewRow row in grid.Rows)
+            {
+                if (row.IsNewRow)
+                {
+                    continue;
+                }
+
+                string first = Convert.ToString(row.Cells[0].Value).Trim();
+                string second = Convert.ToString(row.Cells[1].Value).Trim();
+                if (string.IsNullOrWhiteSpace(first) && string.IsNullOrWhiteSpace(second))
+                {
+                    continue;
+                }
+
+                items.Add(new GuidePair(CleanGuideCell(first), CleanGuideCell(second)));
+            }
+            return items;
+        }
+
+        private RoamGuideData LoadRoamGuideData(string aboutPath)
+        {
+            string text = File.ReadAllText(aboutPath, Encoding.UTF8);
+            var data = new RoamGuideData();
+            data.InfoKicker = GetLiquidAssign(text, "about_info_kicker");
+            data.InfoText = GetLiquidCapture(text, "about_info_text");
+            data.NowKicker = GetLiquidAssign(text, "about_now_kicker");
+            data.NowTitle = GetLiquidAssign(text, "about_now_title");
+            data.NowSummary = GetLiquidCapture(text, "about_now_summary");
+            data.NowUpdated = GetLiquidAssign(text, "about_now_updated");
+            data.SignalItems = ParseGuidePairs(GetLiquidAssign(text, "signal_items"));
+            data.StatusItems = ParseGuidePairs(GetLiquidAssign(text, "status_items"));
+            data.RoadmapItems = ParseGuidePairs(GetLiquidAssign(text, "roadmap_items"));
+            data.ReadingStackItems = ParseGuidePairs(GetLiquidAssign(text, "reading_stack_items"));
+            data.VisualStackItems = ParseGuidePairs(GetLiquidAssign(text, "visual_stack_items"));
+            return data;
+        }
+
+        private void SaveRoamGuideData(string aboutPath, RoamGuideData data)
+        {
+            string text = File.ReadAllText(aboutPath, Encoding.UTF8);
+            text = ReplaceLiquidAssign(text, "about_info_kicker", data.InfoKicker, false);
+            text = ReplaceLiquidCapture(text, "about_info_text", data.InfoText);
+            text = ReplaceLiquidAssign(text, "about_now_kicker", data.NowKicker, false);
+            text = ReplaceLiquidAssign(text, "about_now_title", data.NowTitle, false);
+            text = ReplaceLiquidCapture(text, "about_now_summary", data.NowSummary);
+            text = ReplaceLiquidAssign(text, "about_now_updated", data.NowUpdated, false);
+            text = ReplaceLiquidAssign(text, "signal_items", FormatGuidePairs(data.SignalItems), true);
+            text = ReplaceLiquidAssign(text, "status_items", FormatGuidePairs(data.StatusItems), true);
+            text = ReplaceLiquidAssign(text, "roadmap_items", FormatGuidePairs(data.RoadmapItems), true);
+            text = ReplaceLiquidAssign(text, "reading_stack_items", FormatGuidePairs(data.ReadingStackItems), true);
+            text = ReplaceLiquidAssign(text, "visual_stack_items", FormatGuidePairs(data.VisualStackItems), true);
+            File.WriteAllText(aboutPath, text, new UTF8Encoding(false));
+        }
+
+        private void PublishRoamGuidePage(string aboutPath)
+        {
+            if (!Directory.Exists(Path.Combine(repoRoot, ".git")))
+            {
+                MessageBox.Show(this, "The target blog folder is not a git repository:" + Environment.NewLine + repoRoot, "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            GitResult staged = RunGit("diff --cached --name-only", repoRoot, 30000);
+            if (!staged.Success)
+            {
+                ShowGitOutput("Could not inspect staged changes.", staged);
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(staged.Output))
+            {
+                MessageBox.Show(this, "There are already staged changes in the blog repository. Commit or unstage them before using Save && Publish from the guide panel.", "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string commitMessage = PromptForText("Commit message", "Commit message for roam guide update:", "Update roam guide");
+            if (string.IsNullOrWhiteSpace(commitMessage))
+            {
+                return;
+            }
+
+            using (var progress = new PublishProgressForm("Publishing Roam Guide"))
+            {
+                progress.Show(this);
+                Cursor previousCursor = Cursor.Current;
+                Cursor.Current = Cursors.WaitCursor;
+                UseWaitCursor = true;
+                try
+                {
+                    GitResult addResult = RunGitStep(progress, "Stage _tabs/about.md", "add -- " + QuoteArg("_tabs/about.md"), repoRoot, 60000);
+                    if (!addResult.Success)
+                    {
+                        ShowGitOutput("Failed to stage roam guide page.", addResult);
+                        return;
+                    }
+
+                    GitResult cachedCheck = RunGitStep(progress, "Check staged diff", "diff --cached --check", repoRoot, 60000);
+                    if (!cachedCheck.Success)
+                    {
+                        ShowGitOutput("git diff --cached --check failed. Fix whitespace/errors before publishing.", cachedCheck);
+                        return;
+                    }
+
+                    GitResult cachedDiff = RunGitStep(progress, "Confirm staged changes", "diff --cached --quiet", repoRoot, 60000);
+                    if (cachedDiff.ExitCode == 0)
+                    {
+                        if (HasLocalCommitsToPush(progress))
+                        {
+                            progress.AppendLog("No new staged guide diff, but local commits are waiting to be pushed.");
+                            if (!RunFetchRebasePush(progress))
+                            {
+                                return;
+                            }
+                            progress.MarkComplete("Pushed existing local commits.");
+                            MessageBox.Show(this, "Pushed existing local commits to GitHub.", "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            SetStatus("Pushed existing local commits.");
+                            return;
+                        }
+
+                        MessageBox.Show(this, "No roam guide changes were found for publishing.", "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+
+                    GitResult commitResult = RunGitStep(progress, "Commit guide update", "commit -m " + QuoteArg(commitMessage), repoRoot, 120000);
+                    if (!commitResult.Success)
+                    {
+                        ShowGitOutput("Commit failed.", commitResult);
+                        return;
+                    }
+
+                    if (!RunFetchRebasePush(progress))
+                    {
+                        return;
+                    }
+
+                    progress.MarkComplete("Published roam guide.");
+                    MessageBox.Show(this, "Roam guide published to GitHub." + Environment.NewLine + Environment.NewLine + commitResult.Output.Trim(), "Roam Guide", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    SetStatus("Published roam guide.");
+                }
+                finally
+                {
+                    UseWaitCursor = false;
+                    Cursor.Current = previousCursor;
+                }
+            }
+        }
+
+        private bool HasLocalCommitsToPush(PublishProgressForm progress)
+        {
+            GitResult ahead = RunGitStep(progress, "Check local commits", "rev-list --count origin/main..HEAD", repoRoot, 30000);
+            if (!ahead.Success)
+            {
+                return false;
+            }
+
+            int count;
+            return int.TryParse((ahead.Output ?? "").Trim(), out count) && count > 0;
+        }
+
+        private static string GetLiquidAssign(string text, string name)
+        {
+            Match match = Regex.Match(text, "{%\\s*assign\\s+" + Regex.Escape(name) + "\\s*=\\s*'(?<value>.*?)'\\s*(?:\\|\\s*split:\\s*'\\|\\|'\\s*)?%}", RegexOptions.Singleline);
+            return match.Success ? UnescapeLiquidValue(match.Groups["value"].Value) : "";
+        }
+
+        private static string GetLiquidCapture(string text, string name)
+        {
+            Match match = Regex.Match(text, "{%\\s*capture\\s+" + Regex.Escape(name) + "\\s*%}(?<value>.*?){%\\s*endcapture\\s*%}", RegexOptions.Singleline);
+            return match.Success ? match.Groups["value"].Value.Trim() : "";
+        }
+
+        private static string ReplaceLiquidAssign(string text, string name, string value, bool splitList)
+        {
+            string suffix = splitList ? " | split: '||'" : "";
+            string replacement = "{% assign " + name + " = '" + EscapeLiquidValue(value) + "'" + suffix + " %}";
+            string pattern = "{%\\s*assign\\s+" + Regex.Escape(name) + "\\s*=\\s*'.*?'\\s*(?:\\|\\s*split:\\s*'\\|\\|'\\s*)?%}";
+            return Regex.Replace(text, pattern, replacement, RegexOptions.Singleline);
+        }
+
+        private static string ReplaceLiquidCapture(string text, string name, string value)
+        {
+            string replacement = "{% capture " + name + " %}" + NormalizeMultilineText(value) + "{% endcapture %}";
+            string pattern = "{%\\s*capture\\s+" + Regex.Escape(name) + "\\s*%}.*?{%\\s*endcapture\\s*%}";
+            return Regex.Replace(text, pattern, replacement, RegexOptions.Singleline);
+        }
+
+        private static List<GuidePair> ParseGuidePairs(string value)
+        {
+            var items = new List<GuidePair>();
+            foreach (string rawItem in (value ?? "").Split(new string[] { "||" }, StringSplitOptions.None))
+            {
+                string item = rawItem.Trim();
+                if (item.Length == 0)
+                {
+                    continue;
+                }
+
+                string[] parts = item.Split(new char[] { '|' }, 2);
+                items.Add(new GuidePair(parts.Length > 0 ? parts[0].Trim() : "", parts.Length > 1 ? parts[1].Trim() : ""));
+            }
+            return items;
+        }
+
+        private static string FormatGuidePairs(List<GuidePair> items)
+        {
+            var parts = new List<string>();
+            foreach (GuidePair item in items)
+            {
+                string label = CleanGuideCell(item.Label);
+                string value = CleanGuideCell(item.Value);
+                if (string.IsNullOrWhiteSpace(label) && string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+                parts.Add(label + "|" + value);
+            }
+            return string.Join("||", parts.ToArray());
+        }
+
+        private static string CleanGuideCell(string value)
+        {
+            return NormalizeInlineImageText(value).Replace("|", "｜");
+        }
+
+        private static string NormalizeMultilineText(string value)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+            return value.Replace("\r\n", "\n").Replace("\r", "\n").Trim();
+        }
+
+        private static string EscapeLiquidValue(string value)
+        {
+            return (value ?? "").Replace("'", "&#39;");
+        }
+
+        private static string UnescapeLiquidValue(string value)
+        {
+            return (value ?? "").Replace("&#39;", "'");
         }
 
         private void InsertImagesFromDialog()
@@ -2261,6 +3071,143 @@ namespace NeutriverseWriter
             public List<CopiedImage> Images = new List<CopiedImage>();
         }
 
+        private sealed class GuidePair
+        {
+            public string Label;
+            public string Value;
+
+            public GuidePair(string label, string value)
+            {
+                Label = label ?? "";
+                Value = value ?? "";
+            }
+        }
+
+        private sealed class RoamGuideData
+        {
+            public string InfoKicker = "";
+            public string InfoText = "";
+            public string NowKicker = "";
+            public string NowTitle = "";
+            public string NowSummary = "";
+            public string NowUpdated = "";
+            public List<GuidePair> SignalItems = new List<GuidePair>();
+            public List<GuidePair> StatusItems = new List<GuidePair>();
+            public List<GuidePair> RoadmapItems = new List<GuidePair>();
+            public List<GuidePair> ReadingStackItems = new List<GuidePair>();
+            public List<GuidePair> VisualStackItems = new List<GuidePair>();
+        }
+
+        private sealed class PublishProgressForm : Form
+        {
+            private readonly Label stepLabel;
+            private readonly Label commandLabel;
+            private readonly TextBox logBox;
+            private readonly ProgressBar progressBar;
+            private int stepCount;
+
+            public PublishProgressForm(string title)
+            {
+                Text = title;
+                StartPosition = FormStartPosition.CenterParent;
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MinimizeBox = false;
+                MaximizeBox = false;
+                ClientSize = new Size(680, 420);
+                BackColor = Surface;
+                ForeColor = TextPrimary;
+
+                var root = new TableLayoutPanel();
+                root.Dock = DockStyle.Fill;
+                root.BackColor = Surface;
+                root.Padding = new Padding(16);
+                root.ColumnCount = 1;
+                root.RowCount = 4;
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+                root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                Controls.Add(root);
+
+                stepLabel = new Label();
+                stepLabel.Dock = DockStyle.Fill;
+                stepLabel.Text = "Preparing...";
+                stepLabel.ForeColor = TextPrimary;
+                stepLabel.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+                root.Controls.Add(stepLabel, 0, 0);
+
+                commandLabel = new Label();
+                commandLabel.Dock = DockStyle.Fill;
+                commandLabel.Text = "";
+                commandLabel.ForeColor = TextMuted;
+                commandLabel.Font = new Font("Consolas", 8.5f);
+                root.Controls.Add(commandLabel, 0, 1);
+
+                progressBar = new ProgressBar();
+                progressBar.Dock = DockStyle.Fill;
+                progressBar.Style = ProgressBarStyle.Marquee;
+                progressBar.MarqueeAnimationSpeed = 32;
+                root.Controls.Add(progressBar, 0, 2);
+
+                logBox = new TextBox();
+                logBox.Dock = DockStyle.Fill;
+                logBox.Multiline = true;
+                logBox.ReadOnly = true;
+                logBox.ScrollBars = ScrollBars.Vertical;
+                logBox.BackColor = Color.FromArgb(11, 13, 17);
+                logBox.ForeColor = TextMuted;
+                logBox.BorderStyle = BorderStyle.FixedSingle;
+                logBox.Font = new Font("Consolas", 9f);
+                root.Controls.Add(logBox, 0, 3);
+            }
+
+            public void BeginStep(string step, string command)
+            {
+                stepCount++;
+                stepLabel.Text = "Step " + stepCount + ": " + step;
+                commandLabel.Text = command;
+                AppendLog("");
+                AppendLog(">> " + step);
+                AppendLog(command);
+                Application.DoEvents();
+            }
+
+            public void AppendGitResult(GitResult result)
+            {
+                AppendLog("Exit code: " + result.ExitCode);
+                if (!string.IsNullOrWhiteSpace(result.Output))
+                {
+                    AppendLog(result.Output.Trim());
+                }
+                if (!string.IsNullOrWhiteSpace(result.Error))
+                {
+                    AppendLog(result.Error.Trim());
+                }
+                Application.DoEvents();
+            }
+
+            public void AppendLog(string text)
+            {
+                if (logBox.IsDisposed)
+                {
+                    return;
+                }
+                logBox.AppendText(text + Environment.NewLine);
+                logBox.SelectionStart = logBox.TextLength;
+                logBox.ScrollToCaret();
+            }
+
+            public void MarkComplete(string message)
+            {
+                stepLabel.Text = message;
+                commandLabel.Text = "Done";
+                progressBar.Style = ProgressBarStyle.Blocks;
+                progressBar.Value = 100;
+                AppendLog("Done.");
+                Application.DoEvents();
+            }
+        }
+
         private static GitResult RunGit(string arguments, string workingDirectory, int timeoutMilliseconds)
         {
             var result = new GitResult();
@@ -2311,6 +3258,21 @@ namespace NeutriverseWriter
                 result.Error = ex.ToString();
             }
 
+            return result;
+        }
+
+        private GitResult RunGitStep(PublishProgressForm progress, string step, string arguments, string workingDirectory, int timeoutMilliseconds)
+        {
+            if (progress != null)
+            {
+                progress.BeginStep(step, "git " + arguments);
+            }
+            SetStatus(step + "...");
+            GitResult result = RunGit(arguments, workingDirectory, timeoutMilliseconds);
+            if (progress != null)
+            {
+                progress.AppendGitResult(result);
+            }
             return result;
         }
 

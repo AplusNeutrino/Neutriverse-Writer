@@ -41,6 +41,7 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 - Image insertion adds or reuses `media_subpath`.
 - Inserts Markdown image syntax such as `![alt](image.png)`.
 - Inline Image button copies files to the post media folder and inserts the Neutriverse `{% include inline-image.html %}` floating illustration helper.
+- Guide button opens a quick editor for the Neutriverse roam guide page (`_tabs/about.md`), covering Info, Personal Orbit, Signal/Status/Roadmap, and reading/media stacks.
 - Grouped toolbar menus for files, headings, lists, tables, inline code, code blocks, bold, italic, underline, strikethrough, and horizontal rules.
 - Dropdowns for Neutriverse text colors, underline styles, mark/background helpers, keys, spoilers, and common HTML inline tags.
 - Preview support for Markdown tables, inline-image includes, and Neutriverse custom `nv-*` color/mark helpers.
@@ -56,6 +57,13 @@ Inline Image inserts a right-aligned include using a full site path:
 ```
 
 Shortcut: `Ctrl+Shift+I`.
+
+The Guide panel has two write actions:
+
+- `Save`: updates only `_tabs/about.md` in the target blog repository.
+- `Save && Publish`: stages only `_tabs/about.md`, runs `git diff --cached --check`, commits, fetches/rebases `origin/main`, and pushes `origin main`.
+- The guide publish flow shows a progress/log window, retries fetch on transient connection resets, and can continue pushing an already-created local commit after a previous network failure.
+- The regular post Publish flow uses the same progress/log window, fetch retry behavior, and recovery path for already-created local commits.
 
 ## Version
 
