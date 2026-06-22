@@ -1853,7 +1853,7 @@ namespace NeutriverseWriter
             {
                 string alt = string.IsNullOrWhiteSpace(selectedAlt) || copyResult.Images.Count > 1 ? image.Alt : selectedAlt;
                 inserted.AppendLine("{% include inline-image.html");
-                inserted.AppendLine("  src=\"" + EscapeLiquidParameter(copyResult.MediaSubpath.TrimEnd('/') + "/" + image.FileName.Replace("\\", "/")) + "\"");
+                inserted.AppendLine("  src=\"" + EscapeLiquidParameter(image.FileName.Replace("\\", "/")) + "\"");
                 inserted.AppendLine("  alt=\"" + EscapeLiquidParameter(alt) + "\"");
                 inserted.AppendLine("  align=\"right\"");
                 inserted.AppendLine("%}");

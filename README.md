@@ -46,11 +46,11 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 - Dropdowns for Neutriverse text colors, underline styles, mark/background helpers, keys, spoilers, and common HTML inline tags.
 - Preview support for Markdown tables, inline-image includes, and Neutriverse custom `nv-*` color/mark helpers.
 
-Inline Image inserts a right-aligned include using a full site path:
+Inline Image inserts a right-aligned include using the copied file name. The post's `media_subpath` supplies the image folder:
 
 ```liquid
 {% include inline-image.html
-  src="/assets/img/posts/2026-05-01-example/demo.jpg"
+  src="demo.jpg"
   alt="demo"
   align="right"
 %}
