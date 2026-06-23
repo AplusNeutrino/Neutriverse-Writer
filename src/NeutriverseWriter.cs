@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -445,7 +446,12 @@ namespace NeutriverseWriter
             AddDropdown(toolbar, "Code", new Dictionary<string, EventHandler>
             {
                 { "Inline Code", delegate { WrapSelection("`", "`"); } },
-                { "Code Block", delegate { WrapSelection("```" + Environment.NewLine, Environment.NewLine + "```"); } }
+                { "Code Block", delegate { WrapSelection("```" + Environment.NewLine, Environment.NewLine + "```"); } },
+                { "Text Block...", delegate { OpenTextBlockPanel(); } },
+                { "Text Block - Default Hover", delegate { InsertConfiguredTextBlock(TextBlockOptions.Default(editor.SelectedText)); } },
+                { "Text Block - Plain", delegate { WrapTextBlock("nv-text-block", "#18191b"); } },
+                { "Text Block - Center", delegate { WrapTextBlock("nv-text-block nv-align-center", "#18191b"); } },
+                { "Text Block - Right", delegate { WrapTextBlock("nv-text-block nv-align-right", "#18191b"); } }
             }, "Code formatting");
             toolbar.Items.Add(new ToolStripSeparator());
 
@@ -1848,6 +1854,7 @@ namespace NeutriverseWriter
         {
             string selectedAlt = NormalizeInlineImageText(editor.SelectedText);
             ImageCopyResult copyResult = CopyImagesToPostMedia(files);
+            Dictionary<string, string> captions = PromptForInlineImageCaptions(copyResult.Images);
             var inserted = new StringBuilder();
             foreach (CopiedImage image in copyResult.Images)
             {
@@ -1855,6 +1862,11 @@ namespace NeutriverseWriter
                 inserted.AppendLine("{% include inline-image.html");
                 inserted.AppendLine("  src=\"" + EscapeLiquidParameter(image.FileName.Replace("\\", "/")) + "\"");
                 inserted.AppendLine("  alt=\"" + EscapeLiquidParameter(alt) + "\"");
+                string caption;
+                if (captions.TryGetValue(image.FileName, out caption) && !string.IsNullOrWhiteSpace(caption))
+                {
+                    inserted.AppendLine("  caption=\"" + EscapeLiquidParameter(caption) + "\"");
+                }
                 inserted.AppendLine("  align=\"right\"");
                 inserted.AppendLine("%}");
                 inserted.AppendLine();
@@ -1865,6 +1877,113 @@ namespace NeutriverseWriter
                 InsertAtCursor(inserted.ToString());
                 SetStatus("Inserted inline illustration(s) into " + copyResult.TargetDirectory);
             }
+        }
+
+        private Dictionary<string, string> PromptForInlineImageCaptions(IList<CopiedImage> images)
+        {
+            var captions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (images.Count == 0)
+            {
+                return captions;
+            }
+
+            DialogResult addCaptions = MessageBox.Show(
+                this,
+                "Add small captions below the inserted inline image(s)?",
+                "Inline Image Captions",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (addCaptions != DialogResult.Yes)
+            {
+                return captions;
+            }
+
+            if (images.Count == 1)
+            {
+                string caption = PromptForText("Inline image caption", "Small caption below this image:", "");
+                if (!string.IsNullOrWhiteSpace(caption))
+                {
+                    captions[images[0].FileName] = caption;
+                }
+                return captions;
+            }
+
+            using (var form = new Form())
+            using (var label = new Label())
+            using (var panel = new Panel())
+            using (var okButton = new Button())
+            using (var skipButton = new Button())
+            {
+                form.Text = "Inline image captions";
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.MinimizeBox = false;
+                form.MaximizeBox = false;
+                form.ClientSize = new Size(640, Math.Min(460, 118 + images.Count * 42));
+                form.BackColor = Surface;
+                form.ForeColor = TextPrimary;
+
+                label.Text = "Optional captions. Leave a field blank to insert that image without a caption.";
+                label.SetBounds(14, 14, 612, 24);
+                label.ForeColor = TextMuted;
+
+                panel.SetBounds(14, 46, 612, form.ClientSize.Height - 94);
+                panel.AutoScroll = true;
+                panel.BackColor = Surface;
+
+                var textBoxes = new List<TextBox>();
+                for (int i = 0; i < images.Count; i++)
+                {
+                    CopiedImage image = images[i];
+                    var nameLabel = new Label();
+                    nameLabel.Text = image.FileName;
+                    nameLabel.SetBounds(0, i * 42 + 4, 220, 24);
+                    nameLabel.ForeColor = TextMuted;
+
+                    var textBox = new TextBox();
+                    textBox.SetBounds(230, i * 42, 350, 26);
+                    textBox.BackColor = GetEditorBackColor();
+                    textBox.ForeColor = GetEditorTextColor();
+                    textBox.BorderStyle = BorderStyle.FixedSingle;
+                    textBox.Tag = image.FileName;
+
+                    panel.Controls.Add(nameLabel);
+                    panel.Controls.Add(textBox);
+                    textBoxes.Add(textBox);
+                }
+
+                okButton.Text = "Insert";
+                okButton.DialogResult = DialogResult.OK;
+                okButton.SetBounds(448, form.ClientSize.Height - 38, 84, 28);
+
+                skipButton.Text = "No captions";
+                skipButton.DialogResult = DialogResult.Cancel;
+                skipButton.SetBounds(538, form.ClientSize.Height - 38, 88, 28);
+
+                form.Controls.Add(label);
+                form.Controls.Add(panel);
+                form.Controls.Add(okButton);
+                form.Controls.Add(skipButton);
+                form.AcceptButton = okButton;
+                form.CancelButton = skipButton;
+
+                if (form.ShowDialog(this) != DialogResult.OK)
+                {
+                    return captions;
+                }
+
+                foreach (TextBox textBox in textBoxes)
+                {
+                    string caption = textBox.Text.Trim();
+                    if (!string.IsNullOrWhiteSpace(caption))
+                    {
+                        captions[(string)textBox.Tag] = caption;
+                    }
+                }
+            }
+
+            return captions;
         }
 
         private ImageCopyResult CopyImagesToPostMedia(IEnumerable<string> files)
@@ -1970,6 +2089,175 @@ namespace NeutriverseWriter
         private void WrapSpan(string classes)
         {
             WrapSelection("<span class=\"" + classes + "\">", "</span>");
+        }
+
+        private void WrapTextBlock(string classes, string backgroundColor)
+        {
+            WrapSelection("<div class=\"" + classes + "\" style=\"--nv-text-block-bg: " + backgroundColor + ";\">", "</div>");
+        }
+
+        private void InsertConfiguredTextBlock(TextBlockOptions options)
+        {
+            string original = string.IsNullOrEmpty(options.OriginalText) ? "Original text" : options.OriginalText;
+            string encodedOriginal = WebUtility.HtmlEncode(original);
+            string encodedHover = WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(options.HoverText) ? "中文译文" : options.HoverText);
+            string replacement;
+            if (options.EnableHover)
+            {
+                replacement =
+                    "<div class=\"" + options.BlockClasses + "\" tabindex=\"0\" style=\"--nv-text-block-bg: " + options.BackgroundColor + ";\"><span class=\"nv-text-original\">" +
+                    encodedOriginal +
+                    "</span><span class=\"nv-text-translation " + options.TranslationFontClass + "\">" +
+                    encodedHover +
+                    "</span></div>";
+            }
+            else
+            {
+                replacement =
+                    "<div class=\"" + options.BlockClasses + "\" style=\"--nv-text-block-bg: " + options.BackgroundColor + ";\">" +
+                    encodedOriginal +
+                    "</div>";
+            }
+
+            int start = editor.SelectionStart;
+            editor.SelectedText = replacement;
+            int originalStart = replacement.IndexOf(encodedOriginal, StringComparison.Ordinal);
+            editor.SelectionStart = originalStart >= 0 ? start + originalStart : start;
+            editor.SelectionLength = encodedOriginal.Length;
+            editor.Focus();
+        }
+
+        private void OpenTextBlockPanel()
+        {
+            TextBlockOptions options = TextBlockOptions.Default(editor.SelectedText);
+            using (var form = new Form())
+            using (var originalLabel = new Label())
+            using (var originalBox = new TextBox())
+            using (var hoverCheck = new CheckBox())
+            using (var hoverLabel = new Label())
+            using (var hoverBox = new TextBox())
+            using (var fontLabel = new Label())
+            using (var fontCombo = new ComboBox())
+            using (var hoverFontLabel = new Label())
+            using (var hoverFontCombo = new ComboBox())
+            using (var alignLabel = new Label())
+            using (var alignCombo = new ComboBox())
+            using (var bgLabel = new Label())
+            using (var bgBox = new TextBox())
+            using (var okButton = new Button())
+            using (var cancelButton = new Button())
+            {
+                form.Text = "Text Block";
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.MinimizeBox = false;
+                form.MaximizeBox = false;
+                form.ClientSize = new Size(660, 520);
+                form.BackColor = Surface;
+                form.ForeColor = TextPrimary;
+
+                originalLabel.Text = "Default text";
+                originalLabel.SetBounds(14, 14, 632, 22);
+                originalLabel.ForeColor = TextMuted;
+
+                originalBox.Multiline = true;
+                originalBox.ScrollBars = ScrollBars.Vertical;
+                originalBox.Text = options.OriginalText;
+                originalBox.SetBounds(14, 40, 632, 118);
+                originalBox.BackColor = GetEditorBackColor();
+                originalBox.ForeColor = GetEditorTextColor();
+                originalBox.BorderStyle = BorderStyle.FixedSingle;
+
+                hoverCheck.Text = "Switch to hover text on mouse hover/focus";
+                hoverCheck.Checked = options.EnableHover;
+                hoverCheck.SetBounds(14, 172, 420, 24);
+                hoverCheck.ForeColor = TextPrimary;
+
+                hoverLabel.Text = "Hover text";
+                hoverLabel.SetBounds(14, 204, 632, 22);
+                hoverLabel.ForeColor = TextMuted;
+
+                hoverBox.Multiline = true;
+                hoverBox.ScrollBars = ScrollBars.Vertical;
+                hoverBox.Text = options.HoverText;
+                hoverBox.SetBounds(14, 230, 632, 118);
+                hoverBox.BackColor = GetEditorBackColor();
+                hoverBox.ForeColor = GetEditorTextColor();
+                hoverBox.BorderStyle = BorderStyle.FixedSingle;
+
+                fontLabel.Text = "Default font";
+                fontLabel.SetBounds(14, 366, 120, 22);
+                fontLabel.ForeColor = TextMuted;
+
+                fontCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+                fontCombo.Items.AddRange(new object[] { "Script English", "Normal", "Serif", "Mono" });
+                fontCombo.SelectedIndex = 0;
+                fontCombo.SetBounds(130, 362, 150, 28);
+
+                hoverFontLabel.Text = "Hover font";
+                hoverFontLabel.SetBounds(304, 366, 120, 22);
+                hoverFontLabel.ForeColor = TextMuted;
+
+                hoverFontCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+                hoverFontCombo.Items.AddRange(new object[] { "Ma Shan Zheng", "Zhi Mang Xing", "Long Cang", "Liu Jian Mao Cao", "ZCOOL XiaoWei" });
+                hoverFontCombo.SelectedIndex = 0;
+                hoverFontCombo.SetBounds(416, 362, 230, 28);
+
+                alignLabel.Text = "Alignment";
+                alignLabel.SetBounds(14, 408, 120, 22);
+                alignLabel.ForeColor = TextMuted;
+
+                alignCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+                alignCombo.Items.AddRange(new object[] { "Left", "Center", "Right" });
+                alignCombo.SelectedIndex = 0;
+                alignCombo.SetBounds(130, 404, 150, 28);
+
+                bgLabel.Text = "Background";
+                bgLabel.SetBounds(304, 408, 120, 22);
+                bgLabel.ForeColor = TextMuted;
+
+                bgBox.Text = options.BackgroundColor;
+                bgBox.SetBounds(416, 404, 230, 26);
+                bgBox.BackColor = GetEditorBackColor();
+                bgBox.ForeColor = GetEditorTextColor();
+                bgBox.BorderStyle = BorderStyle.FixedSingle;
+
+                okButton.Text = "Insert";
+                okButton.DialogResult = DialogResult.OK;
+                okButton.SetBounds(466, 474, 84, 28);
+
+                cancelButton.Text = "Cancel";
+                cancelButton.DialogResult = DialogResult.Cancel;
+                cancelButton.SetBounds(562, 474, 84, 28);
+
+                form.Controls.AddRange(new Control[] {
+                    originalLabel, originalBox, hoverCheck, hoverLabel, hoverBox,
+                    fontLabel, fontCombo, hoverFontLabel, hoverFontCombo,
+                    alignLabel, alignCombo, bgLabel, bgBox, okButton, cancelButton
+                });
+                form.AcceptButton = okButton;
+                form.CancelButton = cancelButton;
+
+                if (form.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                options.OriginalText = originalBox.Text;
+                options.EnableHover = hoverCheck.Checked;
+                options.HoverText = hoverBox.Text;
+                options.DefaultFontClass = TextBlockOptions.FontClassFromLabel(fontCombo.Text);
+                options.TranslationFontClass = TextBlockOptions.TranslationFontClassFromLabel(hoverFontCombo.Text);
+                options.AlignmentClass = TextBlockOptions.AlignmentClassFromLabel(alignCombo.Text);
+                options.BackgroundColor = NormalizeTextBlockColor(bgBox.Text);
+                InsertConfiguredTextBlock(options);
+            }
+        }
+
+        private static string NormalizeTextBlockColor(string value)
+        {
+            string color = (value ?? "").Trim();
+            return Regex.IsMatch(color, "^#[0-9a-fA-F]{6}$") ? color : "#18191b";
         }
 
         private void WrapSelection(string before, string after)
@@ -2445,7 +2733,9 @@ namespace NeutriverseWriter
             string previewHeading = comfortMode ? "#e0d5b8" : "#dce8f7";
             string previewCodeBack = comfortMode ? "#292a24" : "#242426";
             string previewInlineCode = comfortMode ? "#34342d" : "#2a2a2d";
+            string previewFontFaces = BuildPreviewFontFaces();
             string baseCss =
+                previewFontFaces +
                 "html,body{background:" + previewBack + "!important;color:" + previewText + "!important;}" +
                 "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC','Microsoft YaHei',sans-serif;line-height:1.75;padding:2rem 2.35rem;max-width:860px;margin:0 auto;}" +
                 ".content{font-size:1.03rem;letter-spacing:0;}" +
@@ -2455,7 +2745,7 @@ namespace NeutriverseWriter
                 ".content h1{font-size:2.05rem}.content h2{font-size:1.65rem}.content h3{font-size:1.35rem}.content h4{font-size:1.18rem}" +
                 "strong{font-weight:700;color:" + previewHeading + ";} em{font-style:italic;} del{text-decoration:line-through;} u{text-decoration:underline;}" +
                 "a{color:#8fb7ff;} img{max-width:100%;height:auto;border-radius:.35rem;}" +
-                ".content .inline-illustration{box-sizing:border-box;float:right;width:42%;max-width:320px;margin:.15rem 0 1rem 1.5rem}.content .inline-illustration.inline-left{float:left;margin:.15rem 1.5rem 1rem 0}.content .inline-illustration img{display:block;width:100%;max-width:100%;height:auto}.content .inline-illustration figcaption{margin-top:.45rem;color:#9aa4b2;font-size:.85rem;line-height:1.35}.content h2,.content h3{clear:both}@media(max-width:720px){.content .inline-illustration,.content .inline-illustration.inline-left{float:none;width:100%;max-width:100%;margin:1rem 0}}" +
+                ".content .inline-illustration{box-sizing:border-box;float:right;width:42%;max-width:320px;margin:.15rem 0 1rem 1.5rem}.content .inline-illustration.inline-left{float:left;margin:.15rem 1.5rem 1rem 0}.content .inline-illustration img{display:block;width:100%;max-width:100%;height:auto}.content .inline-illustration figcaption{margin-top:.5rem;color:rgba(226,231,241,.68);font-size:.78rem;line-height:1.35;text-align:center}.content h2,.content h3{clear:both}@media(max-width:720px){.content .inline-illustration,.content .inline-illustration.inline-left{float:none;width:100%;max-width:100%;margin:1rem 0}}" +
                 "hr{height:1px;margin:2rem 0;border:0;background:#30363d;}" +
                 ".content ul,.content ol{margin:0 0 1rem 1.35rem;padding-left:1.25rem}.content li{margin:.35rem 0}.content li::marker{color:#9aa4b2;}" +
                 ".content blockquote{margin:1.2rem 0 1.2rem 1rem;padding:.1rem 0 .1rem 1rem;border-left:.22rem solid #4f6fff!important;background:transparent!important;color:" + previewText + "!important;}" +
@@ -2463,6 +2753,11 @@ namespace NeutriverseWriter
                 ".content code{font-family:Consolas,'Cascadia Mono',monospace;font-size:.92em;background:" + previewInlineCode + "!important;color:" + previewHeading + "!important;border-radius:0;padding:.13rem .34rem;}" +
                 ".content pre{margin:1rem 0 1.25rem;padding:1rem;background:" + previewCodeBack + "!important;color:" + previewHeading + "!important;border-radius:0;overflow:auto;white-space:pre-wrap;word-wrap:break-word;}" +
                 ".content pre code{display:block;padding:0;background:transparent!important;color:inherit!important;border:0;}" +
+                ".content .nv-text-block{margin:1.25rem 0 1.5rem;padding:1.05rem 1.2rem;border:1px solid rgba(0,77,255,.46);border-radius:0;background:#18191b;box-shadow:0 0 0 1px rgba(0,77,255,.1),0 0 1.15rem rgba(0,77,255,.16);color:rgba(226,231,241,.88);font-family:inherit;font-size:.96rem;line-height:1.75;white-space:pre-wrap;}" +
+                ".content .nv-text-block.nv-font-script{font-family:'Segoe Script','Brush Script MT','Lucida Handwriting',cursive;font-size:1.08rem;line-height:1.9}.content .nv-text-block.nv-font-serif{font-family:Georgia,'Times New Roman',serif}.content .nv-text-block.nv-font-mono{font-family:'Cascadia Mono',Consolas,monospace;font-size:.92rem}" +
+                ".content .nv-text-block.nv-font-cn-script,.content .nv-text-block .nv-font-cn-script{font-family:'NV Ma Shan Zheng',cursive;font-size:1.05rem;letter-spacing:.03em;line-height:1.95}.content .nv-text-block.nv-font-cn-longcang,.content .nv-text-block .nv-font-cn-longcang{font-family:'NV Long Cang',cursive;font-size:1.1rem;line-height:1.95}.content .nv-text-block.nv-font-cn-zhimang,.content .nv-text-block .nv-font-cn-zhimang{font-family:'NV Zhi Mang Xing',cursive;font-size:1.05rem;letter-spacing:.03em;line-height:1.95}.content .nv-text-block.nv-font-cn-maocao,.content .nv-text-block .nv-font-cn-maocao{font-family:'NV Liu Jian Mao Cao',cursive;font-size:1.08rem;line-height:2}.content .nv-text-block.nv-font-cn-mashan,.content .nv-text-block .nv-font-cn-mashan{font-family:'NV Ma Shan Zheng',cursive;font-size:1.06rem;line-height:1.9}.content .nv-text-block.nv-font-cn-xiaowei,.content .nv-text-block .nv-font-cn-xiaowei{font-family:'NV ZCOOL XiaoWei',serif;font-size:1.02rem;line-height:1.9}" +
+                ".content .nv-text-block.nv-bilingual{cursor:help;white-space:normal}.content .nv-text-block .nv-text-original,.content .nv-text-block .nv-text-translation{white-space:pre-wrap}.content .nv-text-block .nv-text-translation{display:none}.content .nv-text-block.nv-bilingual:hover>.nv-text-original,.content .nv-text-block.nv-bilingual:focus>.nv-text-original,.content .nv-text-block.nv-bilingual:focus-within>.nv-text-original{display:none}.content .nv-text-block.nv-bilingual:hover>.nv-text-translation,.content .nv-text-block.nv-bilingual:focus>.nv-text-translation,.content .nv-text-block.nv-bilingual:focus-within>.nv-text-translation{display:block}" +
+                ".content .nv-text-block.nv-align-center{text-align:center}.content .nv-text-block.nv-align-right{text-align:right}" +
                 ".content table{border-collapse:collapse;width:100%;margin:1rem 0 1.25rem;display:table}.content th,.content td{border:1px solid #34383f;padding:.45rem .65rem}.content th{background:" + previewCodeBack + "!important;color:" + previewHeading + "!important;font-weight:700}.content td{background:" + previewBack + "!important}" +
                 ".nv-red{color:#ff7d7d!important}.nv-orange{color:#ffab70!important}.nv-gold{color:#d8b76a!important}.nv-green{color:#7ee787!important}.nv-cyan{color:#76e3ea!important}.nv-blue{color:#79c0ff!important}.nv-purple{color:#d2a8ff!important}.nv-pink{color:#ff9bd2!important}.nv-muted{color:#8b949e!important}" +
                 ".nv-underline{display:inline;border-bottom:.08em solid currentColor!important;text-decoration:none!important;padding-bottom:.04em}.nv-dotted{display:inline;border-bottom:.1em dotted currentColor!important;text-decoration:none!important;padding-bottom:.04em}.nv-wavy{display:inline;border-bottom:.1em solid currentColor!important;text-decoration:none!important;padding-bottom:.04em}" +
@@ -2622,6 +2917,42 @@ namespace NeutriverseWriter
                 if (inCode)
                 {
                     output.AppendLine(WebUtility.HtmlEncode(line));
+                    continue;
+                }
+
+                if (IsTextBlockStart(trimmed))
+                {
+                    flushParagraph();
+                    closeList();
+                    flushTable();
+                    flushQuote();
+                    var textBlock = new StringBuilder();
+                    string textBlockClass = ExtractTextBlockClasses(line);
+                    string textBlockStyle = ExtractTextBlockStyle(line);
+                    string firstContent = ExtractTextBlockFirstLine(line);
+                    if (firstContent.Length > 0)
+                    {
+                        textBlock.AppendLine(firstContent);
+                    }
+                    while (!trimmed.Contains("</div>") && i + 1 < rawLines.Length)
+                    {
+                        i++;
+                        line = rawLines[i].TrimEnd();
+                        trimmed = line.Trim();
+                        if (trimmed.Equals("</div>", StringComparison.OrdinalIgnoreCase))
+                        {
+                            break;
+                        }
+                        textBlock.AppendLine(line);
+                    }
+                    output.Append("<div").Append(SourceLineAttr(sourceLine)).Append(" class=\"").Append(WebUtility.HtmlEncode(textBlockClass)).Append("\"");
+                    if (textBlockStyle.Length > 0)
+                    {
+                        output.Append(" style=\"").Append(WebUtility.HtmlEncode(textBlockStyle)).Append("\"");
+                    }
+                    output.Append(">")
+                        .Append(RenderTextBlockInnerHtml(textBlock.ToString().TrimEnd()))
+                        .AppendLine("</div>");
                     continue;
                 }
 
@@ -2805,6 +3136,142 @@ namespace NeutriverseWriter
         private static string SourceLineAttr(int line)
         {
             return line >= 0 ? " data-src-line=\"" + line + "\"" : "";
+        }
+
+        private string BuildPreviewFontFaces()
+        {
+            var fonts = new[]
+            {
+                new[] { "NV Zhi Mang Xing", "zhimangxing", "ZhiMangXing-Regular.ttf" },
+                new[] { "NV Long Cang", "longcang", "LongCang-Regular.ttf" },
+                new[] { "NV Liu Jian Mao Cao", "liujianmaocao", "LiuJianMaoCao-Regular.ttf" },
+                new[] { "NV Ma Shan Zheng", "mashanzheng", "MaShanZheng-Regular.ttf" },
+                new[] { "NV ZCOOL XiaoWei", "zcoolxiaowei", "ZCOOLXiaoWei-Regular.ttf" }
+            };
+            var css = new StringBuilder();
+            foreach (string[] font in fonts)
+            {
+                string path = Path.Combine(repoRoot, "assets", "fonts", "chinese-display", font[1], font[2]);
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+                css.Append("@font-face{font-family:'").Append(font[0]).Append("';src:url('")
+                    .Append(new Uri(path).AbsoluteUri)
+                    .Append("') format('truetype');font-display:swap;}");
+            }
+            return css.ToString();
+        }
+
+        private static bool IsTextBlockStart(string trimmed)
+        {
+            return Regex.IsMatch(trimmed, "^<div\\s+[^>]*class\\s*=\\s*(['\\\"])[^'\\\"]*\\bnv-text-block\\b[^'\\\"]*\\1[^>]*>", RegexOptions.IgnoreCase);
+        }
+
+        private static string ExtractTextBlockClasses(string line)
+        {
+            Match match = Regex.Match(line, "\\bclass\\s*=\\s*(['\\\"])([^'\\\"]*)\\1", RegexOptions.IgnoreCase);
+            var classes = new List<string>();
+            classes.Add("nv-text-block");
+            if (!match.Success)
+            {
+                return string.Join(" ", classes.ToArray());
+            }
+
+            foreach (string rawClass in match.Groups[2].Value.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string className = rawClass.Trim();
+                if (className == "nv-text-block")
+                {
+                    continue;
+                }
+                if (className == "nv-font-script" || className == "nv-font-serif" || className == "nv-font-mono" ||
+                    className == "nv-font-cn-script" || className == "nv-font-cn-longcang" ||
+                    className == "nv-font-cn-zhimang" || className == "nv-font-cn-maocao" || className == "nv-font-cn-mashan" ||
+                    className == "nv-font-cn-xiaowei" || className == "nv-align-center" ||
+                    className == "nv-align-right" || className == "nv-bilingual")
+                {
+                    classes.Add(className);
+                }
+            }
+
+            return string.Join(" ", classes.ToArray());
+        }
+
+        private static string ExtractTextBlockStyle(string line)
+        {
+            Match match = Regex.Match(line, "\\bstyle\\s*=\\s*(['\\\"])([^'\\\"]*)\\1", RegexOptions.IgnoreCase);
+            if (!match.Success)
+            {
+                return "";
+            }
+
+            Match color = Regex.Match(match.Groups[2].Value, "--nv-text-block-bg\\s*:\\s*(#[0-9a-fA-F]{6})\\s*;?", RegexOptions.IgnoreCase);
+            return color.Success ? "--nv-text-block-bg: " + color.Groups[1].Value + ";" : "";
+        }
+
+        private static string RenderTextBlockInnerHtml(string content)
+        {
+            var replacements = new Dictionary<string, string>();
+            int index = 0;
+            string tokenized = Regex.Replace(content, "</span>|<span\\s+[^>]*class\\s*=\\s*(['\\\"])([^'\\\"]*)\\1[^>]*>", delegate(Match match)
+            {
+                string html;
+                if (match.Value.StartsWith("</", StringComparison.Ordinal))
+                {
+                    html = "</span>";
+                }
+                else
+                {
+                    string classes = ExtractAllowedTextSpanClasses(match.Groups[2].Value);
+                    if (classes.Length == 0)
+                    {
+                        return match.Value;
+                    }
+                    html = "<span class=\"" + WebUtility.HtmlEncode(classes) + "\">";
+                }
+
+                string token = "%%NVSPAN" + index.ToString(CultureInfo.InvariantCulture) + "%%";
+                index++;
+                replacements[token] = html;
+                return token;
+            }, RegexOptions.IgnoreCase);
+
+            string encoded = WebUtility.HtmlEncode(tokenized);
+            foreach (KeyValuePair<string, string> replacement in replacements)
+            {
+                encoded = encoded.Replace(replacement.Key, replacement.Value);
+            }
+            return encoded;
+        }
+
+        private static string ExtractAllowedTextSpanClasses(string classValue)
+        {
+            var classes = new List<string>();
+            foreach (string rawClass in classValue.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string className = rawClass.Trim();
+                if (className == "nv-text-original" || className == "nv-text-translation" ||
+                    className == "nv-font-cn-script" || className == "nv-font-cn-longcang" ||
+                    className == "nv-font-cn-zhimang" || className == "nv-font-cn-maocao" || className == "nv-font-cn-mashan" ||
+                    className == "nv-font-cn-xiaowei" || className == "nv-align-center" ||
+                    className == "nv-align-right")
+                {
+                    classes.Add(className);
+                }
+            }
+            return string.Join(" ", classes.ToArray());
+        }
+
+        private static string ExtractTextBlockFirstLine(string line)
+        {
+            Match match = Regex.Match(line, "^\\s*<div\\s+[^>]*class\\s*=\\s*(['\\\"])[^'\\\"]*\\bnv-text-block\\b[^'\\\"]*\\1[^>]*>(.*)$", RegexOptions.IgnoreCase);
+            if (!match.Success)
+            {
+                return "";
+            }
+
+            return Regex.Replace(match.Groups[2].Value, "</div>\\s*$", "", RegexOptions.IgnoreCase);
         }
 
         private string RenderInlineImageInclude(string includeText, string mediaSubpath, int sourceLine)
@@ -3385,6 +3852,99 @@ namespace NeutriverseWriter
             string name = string.IsNullOrWhiteSpace(currentFile) ? "Untitled" : Path.GetFileName(currentFile);
             Text = (HasUnsavedChanges() ? "* " : "") + name + " - Neutriverse Writer";
             UpdateUiState();
+        }
+
+        private sealed class TextBlockOptions
+        {
+            public string OriginalText = "";
+            public bool EnableHover = true;
+            public string HoverText = "";
+            public string DefaultFontClass = "nv-font-script";
+            public string TranslationFontClass = "nv-font-cn-script";
+            public string AlignmentClass = "";
+            public string BackgroundColor = "#18191b";
+
+            public string BlockClasses
+            {
+                get
+                {
+                    var classes = new List<string>();
+                    classes.Add("nv-text-block");
+                    if (EnableHover)
+                    {
+                        classes.Add("nv-bilingual");
+                    }
+                    if (!string.IsNullOrWhiteSpace(DefaultFontClass))
+                    {
+                        classes.Add(DefaultFontClass);
+                    }
+                    if (!string.IsNullOrWhiteSpace(AlignmentClass))
+                    {
+                        classes.Add(AlignmentClass);
+                    }
+                    return string.Join(" ", classes.ToArray());
+                }
+            }
+
+            public static TextBlockOptions Default(string selectedText)
+            {
+                return new TextBlockOptions
+                {
+                    OriginalText = string.IsNullOrWhiteSpace(selectedText) ? "Original text" : selectedText,
+                    EnableHover = true,
+                    HoverText = "中文译文",
+                    DefaultFontClass = "nv-font-script",
+                    TranslationFontClass = "nv-font-cn-script",
+                    AlignmentClass = "",
+                    BackgroundColor = "#18191b"
+                };
+            }
+
+            public static string FontClassFromLabel(string label)
+            {
+                switch (label)
+                {
+                    case "Script English":
+                        return "nv-font-script";
+                    case "Serif":
+                        return "nv-font-serif";
+                    case "Mono":
+                        return "nv-font-mono";
+                    default:
+                        return "";
+                }
+            }
+
+            public static string TranslationFontClassFromLabel(string label)
+            {
+                switch (label)
+                {
+                    case "Zhi Mang Xing":
+                        return "nv-font-cn-zhimang";
+                    case "Long Cang":
+                        return "nv-font-cn-longcang";
+                    case "Liu Jian Mao Cao":
+                        return "nv-font-cn-maocao";
+                    case "ZCOOL XiaoWei":
+                        return "nv-font-cn-xiaowei";
+                    case "Ma Shan Zheng":
+                    default:
+                        return "nv-font-cn-script";
+                }
+            }
+
+            public static string AlignmentClassFromLabel(string label)
+            {
+                switch (label)
+                {
+                    case "Center":
+                        return "nv-align-center";
+                    case "Right":
+                        return "nv-align-right";
+                    default:
+                        return "";
+                }
+            }
         }
 
         private sealed class NeutriverseToolStripRenderer : ToolStripProfessionalRenderer

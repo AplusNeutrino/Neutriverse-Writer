@@ -40,9 +40,10 @@ When opened without an argument, it tries to discover a nearby Jekyll repository
 - Image insertion copies files to `assets/img/posts/<date-title>/`.
 - Image insertion adds or reuses `media_subpath`.
 - Inserts Markdown image syntax such as `![alt](image.png)`.
-- Inline Image button copies files to the post media folder and inserts the Neutriverse `{% include inline-image.html %}` floating illustration helper.
+- Inline Image button copies files to the post media folder and inserts the Neutriverse `{% include inline-image.html %}` floating illustration helper, with optional small captions.
 - Guide button opens a quick editor for the Neutriverse roam guide page (`_tabs/about.md`), covering Info, Personal Orbit, Signal/Status/Roadmap, and reading/media stacks.
-- Grouped toolbar menus for files, headings, lists, tables, inline code, code blocks, bold, italic, underline, strikethrough, and horizontal rules.
+- Grouped toolbar menus for files, headings, lists, tables, inline code, code blocks, configurable soft text blocks, bold, italic, underline, strikethrough, and horizontal rules.
+- Text Block options cover hover translation, hover text, English/Chinese display fonts, alignment, and block background color. The default uses the current bilingual script style and `#18191b`.
 - Dropdowns for Neutriverse text colors, underline styles, mark/background helpers, keys, spoilers, and common HTML inline tags.
 - Preview support for Markdown tables, inline-image includes, and Neutriverse custom `nv-*` color/mark helpers.
 
@@ -52,6 +53,7 @@ Inline Image inserts a right-aligned include using the copied file name. The pos
 {% include inline-image.html
   src="demo.jpg"
   alt="demo"
+  caption="Optional small caption"
   align="right"
 %}
 ```
