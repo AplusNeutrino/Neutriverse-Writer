@@ -2099,8 +2099,8 @@ namespace NeutriverseWriter
         private void InsertConfiguredTextBlock(TextBlockOptions options)
         {
             string original = string.IsNullOrEmpty(options.OriginalText) ? "Original text" : options.OriginalText;
-            string encodedOriginal = WebUtility.HtmlEncode(original);
-            string encodedHover = WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(options.HoverText) ? "中文译文" : options.HoverText);
+            string encodedOriginal = HtmlEncodeTextBlockContent(original);
+            string encodedHover = HtmlEncodeTextBlockContent(string.IsNullOrWhiteSpace(options.HoverText) ? "中文译文" : options.HoverText);
             string replacement;
             if (options.EnableHover)
             {
@@ -2258,6 +2258,11 @@ namespace NeutriverseWriter
         {
             string color = (value ?? "").Trim();
             return Regex.IsMatch(color, "^#[0-9a-fA-F]{6}$") ? color : "#18191b";
+        }
+
+        private static string HtmlEncodeTextBlockContent(string value)
+        {
+            return WebUtility.HtmlEncode(value ?? "").Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "<br>" + Environment.NewLine);
         }
 
         private void WrapSelection(string before, string after)
@@ -2756,7 +2761,7 @@ namespace NeutriverseWriter
                 ".content .nv-text-block{margin:1.25rem 0 1.5rem;padding:1.05rem 1.2rem;border:1px solid rgba(0,77,255,.46);border-radius:0;background:#18191b;box-shadow:0 0 0 1px rgba(0,77,255,.1),0 0 1.15rem rgba(0,77,255,.16);color:rgba(226,231,241,.88);font-family:inherit;font-size:.96rem;line-height:1.75;white-space:pre-wrap;}" +
                 ".content .nv-text-block.nv-font-script{font-family:'Segoe Script','Brush Script MT','Lucida Handwriting',cursive;font-size:1.08rem;line-height:1.9}.content .nv-text-block.nv-font-serif{font-family:Georgia,'Times New Roman',serif}.content .nv-text-block.nv-font-mono{font-family:'Cascadia Mono',Consolas,monospace;font-size:.92rem}" +
                 ".content .nv-text-block.nv-font-cn-script,.content .nv-text-block .nv-font-cn-script{font-family:'NV Ma Shan Zheng',cursive;font-size:1.05rem;letter-spacing:.03em;line-height:1.95}.content .nv-text-block.nv-font-cn-longcang,.content .nv-text-block .nv-font-cn-longcang{font-family:'NV Long Cang',cursive;font-size:1.1rem;line-height:1.95}.content .nv-text-block.nv-font-cn-zhimang,.content .nv-text-block .nv-font-cn-zhimang{font-family:'NV Zhi Mang Xing',cursive;font-size:1.05rem;letter-spacing:.03em;line-height:1.95}.content .nv-text-block.nv-font-cn-maocao,.content .nv-text-block .nv-font-cn-maocao{font-family:'NV Liu Jian Mao Cao',cursive;font-size:1.08rem;line-height:2}.content .nv-text-block.nv-font-cn-mashan,.content .nv-text-block .nv-font-cn-mashan{font-family:'NV Ma Shan Zheng',cursive;font-size:1.06rem;line-height:1.9}.content .nv-text-block.nv-font-cn-xiaowei,.content .nv-text-block .nv-font-cn-xiaowei{font-family:'NV ZCOOL XiaoWei',serif;font-size:1.02rem;line-height:1.9}" +
-                ".content .nv-text-block.nv-bilingual{cursor:help;white-space:normal}.content .nv-text-block .nv-text-original,.content .nv-text-block .nv-text-translation{white-space:pre-wrap}.content .nv-text-block .nv-text-translation{display:none}.content .nv-text-block.nv-bilingual:hover>.nv-text-original,.content .nv-text-block.nv-bilingual:focus>.nv-text-original,.content .nv-text-block.nv-bilingual:focus-within>.nv-text-original{display:none}.content .nv-text-block.nv-bilingual:hover>.nv-text-translation,.content .nv-text-block.nv-bilingual:focus>.nv-text-translation,.content .nv-text-block.nv-bilingual:focus-within>.nv-text-translation{display:block}" +
+                ".content .nv-text-block.nv-bilingual{cursor:help;white-space:normal}.content .nv-text-block .nv-text-original,.content .nv-text-block .nv-text-translation{white-space:normal}.content .nv-text-block .nv-text-translation{display:none}.content .nv-text-block.nv-bilingual:hover>.nv-text-original,.content .nv-text-block.nv-bilingual:focus>.nv-text-original,.content .nv-text-block.nv-bilingual:focus-within>.nv-text-original{display:none}.content .nv-text-block.nv-bilingual:hover>.nv-text-translation,.content .nv-text-block.nv-bilingual:focus>.nv-text-translation,.content .nv-text-block.nv-bilingual:focus-within>.nv-text-translation{display:block}" +
                 ".content .nv-text-block.nv-align-center{text-align:center}.content .nv-text-block.nv-align-right{text-align:right}" +
                 ".content table{border-collapse:collapse;width:100%;margin:1rem 0 1.25rem;display:table}.content th,.content td{border:1px solid #34383f;padding:.45rem .65rem}.content th{background:" + previewCodeBack + "!important;color:" + previewHeading + "!important;font-weight:700}.content td{background:" + previewBack + "!important}" +
                 ".nv-red{color:#ff7d7d!important}.nv-orange{color:#ffab70!important}.nv-gold{color:#d8b76a!important}.nv-green{color:#7ee787!important}.nv-cyan{color:#76e3ea!important}.nv-blue{color:#79c0ff!important}.nv-purple{color:#d2a8ff!important}.nv-pink{color:#ff9bd2!important}.nv-muted{color:#8b949e!important}" +
@@ -3214,10 +3219,14 @@ namespace NeutriverseWriter
         {
             var replacements = new Dictionary<string, string>();
             int index = 0;
-            string tokenized = Regex.Replace(content, "</span>|<span\\s+[^>]*class\\s*=\\s*(['\\\"])([^'\\\"]*)\\1[^>]*>", delegate(Match match)
+            string tokenized = Regex.Replace(content, "<br\\s*/?>|</span>|<span\\s+[^>]*class\\s*=\\s*(['\\\"])([^'\\\"]*)\\1[^>]*>", delegate(Match match)
             {
                 string html;
-                if (match.Value.StartsWith("</", StringComparison.Ordinal))
+                if (Regex.IsMatch(match.Value, "^<br\\s*/?>$", RegexOptions.IgnoreCase))
+                {
+                    html = "<br>";
+                }
+                else if (match.Value.StartsWith("</", StringComparison.Ordinal))
                 {
                     html = "</span>";
                 }
